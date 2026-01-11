@@ -30,6 +30,11 @@ jobs:
       - echo *** Build the component ***
       - amu -f Makefile export  
 
+      - echo *** Export the built library
+      - cat <Exports$Dir>.Lib.GContext
+      - cdir Artifacts
+      - cdir Artifacts.Lib
+      - copy <Exports$Dir>.Lib.GContext Artifacts.Lib.GContext ~CVRF
 
       - echo
       - echo *** SUCCESS ***
@@ -40,4 +45,4 @@ jobs:
     artifacts:
       # Each element of the artifacts should have a path key, which gives the file or
       # directory to return.
-      - path: <Lib$Dir>.GContext
+      - path: Artifacts
