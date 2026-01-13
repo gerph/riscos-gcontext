@@ -67,12 +67,12 @@ void vdu5_getstringsize(gcontext_t *gc, font_t fh, stringbounds_t *bounds,
                    (of the left base line)
                bg,fg = colours to use
                str-> the string to plot
-               len = the number of characters to plot, or -1 for all
+               strsize = the number of characters to plot, or -1 for all
  Returns:      coords_t for the end position
  ******************************************************************/
 coords_t vdu5_paint(gcontext_t *gc, font_t fh, int x, int y,
-                    uint32_t bg, uint32_t fg,
-                    const char *str, int len);
+                    colour_t bg, colour_t fg,
+                    const char *str, int strsize);
 
 /*************************************************** Gerph *********
  Function:     vdu5_paintattrib
@@ -81,7 +81,7 @@ coords_t vdu5_paint(gcontext_t *gc, font_t fh, int x, int y,
                fh = the handle to plot with
                x0,y0,x1,y1 = box to centre in
                str-> the string to use
-               len = the length to use
+               strsize = the length to use
                bg,fg = colour to use
                attrib = the attributes to use
  Returns:      coords_t for the end position
@@ -89,7 +89,7 @@ coords_t vdu5_paint(gcontext_t *gc, font_t fh, int x, int y,
 coords_t vdu5_paintattrib(gcontext_t *gc,
                           font_t fh, int x0, int y0, int x1, int y1,
                           const char *str, int strsize,
-                          uint32_t bg, uint32_t fg,
+                          colour_t bg, colour_t fg,
                           uint32_t attr);
 
 #endif

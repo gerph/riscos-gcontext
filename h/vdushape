@@ -21,7 +21,7 @@
                x1,y1 = top right
  Returns:      none
  ******************************************************************/
-void gcontext_vdu_rectfill(gcontext_t *gc, uint32_t colour,
+void gcontext_vdu_rectfill(gcontext_t *gc, colour_t colour,
                            int x0, int y0, int x1, int y1);
 
 /*************************************************** Gerph *********
@@ -34,7 +34,7 @@ void gcontext_vdu_rectfill(gcontext_t *gc, uint32_t colour,
                x2,y2 = third
  Returns:      none
  ******************************************************************/
-void gcontext_vdu_trifill(gcontext_t *gc, uint32_t colour,
+void gcontext_vdu_trifill(gcontext_t *gc, colour_t colour,
                           int x0, int y0, int x1, int y1, int x2, int y2);
 
 /*************************************************** Gerph *********
@@ -44,7 +44,7 @@ void gcontext_vdu_trifill(gcontext_t *gc, uint32_t colour,
                col = the colour to draw with
  Returns:      none
  ******************************************************************/
-void gcontext_vdu_linestart(gcontext_t *gc, uint32_t colour);
+void gcontext_vdu_linestart(gcontext_t *gc, colour_t colour);
 
 /*************************************************** Gerph *********
  Function:     gcontext_vdu_lineend
@@ -80,7 +80,7 @@ void gcontext_vdu_linedashed(gcontext_t *gc, int x0, int y0, int x1, int y1);
 
 
 /* Fill routines only for debugging */
-void gcontext_vdu_fill_start(gcontext_t *gc, uint32_t fill_colour);
+void gcontext_vdu_fill_start(gcontext_t *gc, colour_t fill_colour);
 void gcontext_vdu_fill_move(gcontext_t *gc, int x, int y);
 void gcontext_vdu_fill_line(gcontext_t *gc, int x, int y);
 void gcontext_vdu_fill_close(gcontext_t *gc);

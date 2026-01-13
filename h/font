@@ -48,13 +48,13 @@ bounds_t font_getem(gcontext_t *gc, font_t font);
                bounds-> the box to fill in
                xlimit = the widest the string may be, or -1 for unlimited
                str-> the string to read
-               len = the number of characters to process, or -1 for all
+               strsize = the number of characters to process, or -1 for all
                splitchar = character to split on, or 0 for none
  Returns:      none
  ******************************************************************/
 void font_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
                         int32_t xlimit,
-                        const char *str, int32_t len, char split_char);
+                        const char *str, int32_t strsize, char split_char);
 
 /*************************************************** Gerph *********
  Function:     font_paint
@@ -70,7 +70,7 @@ void font_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
  Returns:      coords_t for the end position
  ******************************************************************/
 coords_t font_paint(gcontext_t *gc, font_t font, int32_t x, int32_t y,
-                    uint32_t bg, uint32_t fg,
+                    colour_t bg, colour_t fg,
                     const char *str, int len);
 
 /*************************************************** Gerph *********
@@ -87,7 +87,7 @@ coords_t font_paint(gcontext_t *gc, font_t font, int32_t x, int32_t y,
  ******************************************************************/
 coords_t font_paintattrib(gcontext_t *gc, font_t fonthandle, int x0, int y0, int x1, int y1,
                           const char *str, int len,
-                          uint32_t bg, uint32_t fg,
+                          colour_t bg, colour_t fg,
                           uint32_t attrib);
 
 #endif

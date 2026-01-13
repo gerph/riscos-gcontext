@@ -35,7 +35,7 @@
  Returns:      none
  ******************************************************************/
 static void gcontext_generic_rectoutline(gcontext_t *gc,
-                                         uint32_t colour,
+                                         colour_t colour,
                                          int x0, int y0, int x1, int y1)
 {
     gc->line_start(gc, colour);
