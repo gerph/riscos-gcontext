@@ -51,6 +51,7 @@ static void gcontext_generic_rectoutline(gcontext_t *gc,
  Function:     gcontext_initvdu
  Description:  Initialise the graphics context for the VDU system
  Parameters:   fonts = 1 if we should use fonts
+                       2 if we should use fonts, but fallback if unavailable
  Returns:      gcontext_t to use for plotting, or NULL if unavailable
  ******************************************************************/
 gcontext_t *gcontext_initvdu(int fonts)
@@ -68,23 +69,36 @@ gcontext_t *gcontext_initvdu(int fonts)
     gc->line_end = gcontext_vdu_lineend;
     gc->fill_start = NULL; /* We don't have any 'fill' routines */
     gc->triangle_fill = gcontext_vdu_trifill;
-    if (!fonts)
+
+    switch (fonts)
     {
-        gc->text_findfont = vdu5_findfont;
-        gc->text_losefont = vdu5_losefont;
-        gc->text_getstringsize = vdu5_getstringsize;
-        gc->text_getemsize = vdu5_getem;
-        gc->text_paint = vdu5_paint;
-        gc->text_paintattrib = vdu5_paintattrib;
-    }
-    else
-    {
-        gc->text_findfont = font_findfont;
-        gc->text_losefont = font_losefont;
-        gc->text_getstringsize = font_getstringsize;
-        gc->text_getemsize = font_getem;
-        gc->text_paint = font_paint;
-        gc->text_paintattrib = font_paintattrib;
+        default:
+        case 0: /* No fonts */
+            gc->text_findfont = vdu5_findfont;
+            gc->text_losefont = vdu5_losefont;
+            gc->text_getstringsize = vdu5_getstringsize;
+            gc->text_getemsize = vdu5_getem;
+            gc->text_paint = vdu5_paint;
+            gc->text_paintattrib = vdu5_paintattrib;
+            break;
+
+        case 1: /* Fonts always used */
+            gc->text_findfont = font_findfont;
+            gc->text_losefont = font_losefont;
+            gc->text_getstringsize = font_getstringsize;
+            gc->text_getemsize = font_getem;
+            gc->text_paint = font_paint;
+            gc->text_paintattrib = font_paintattrib;
+            break;
+
+        case 2: /* Fonts used if available, fallback to System font */
+            gc->text_findfont = fontfallback_findfont;
+            gc->text_losefont = fontfallback_losefont;
+            gc->text_getstringsize = fontfallback_getstringsize;
+            gc->text_getemsize = fontfallback_getem;
+            gc->text_paint = fontfallback_paint;
+            gc->text_paintattrib = fontfallback_paintattrib;
+            break;
     }
 #ifdef DEBUG_FILL
     gc->fill_start = gcontext_vdu_fill_start;

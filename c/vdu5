@@ -16,7 +16,7 @@
 
 /* Define this to debug this file */
 //#undef DEBUG
-//#define DEBUG
+#define DEBUG
 
 #ifdef DEBUG
 #define dprintf if (1) _swix(0x104,0), printf
@@ -37,9 +37,9 @@ font_t vdu5_findfont(gcontext_t *gc, const char *name, int xsize, int ysize)
 {
   uint32_t composite;
   uint32_t xeig, yeig;
-#define POINT_SIZE_MAPS_TO_REGULAR_CHARACTERS (8)
-  xsize = xsize * 8 / POINT_SIZE_MAPS_TO_REGULAR_CHARACTERS / 16;
-  ysize = ysize * 8 / POINT_SIZE_MAPS_TO_REGULAR_CHARACTERS / 16;
+#define POINT_SIZE_MAPS_TO_REGULAR_CHARACTERS (12)
+  xsize = xsize * 16 / POINT_SIZE_MAPS_TO_REGULAR_CHARACTERS / 16;
+  ysize = ysize * 32 / POINT_SIZE_MAPS_TO_REGULAR_CHARACTERS / 16;
   _swix(OS_ReadModeVariable, _INR(0,1)|_OUT(2), -1, 4, &xeig);
   _swix(OS_ReadModeVariable, _INR(0,1)|_OUT(2), -1, 5, &yeig);
   composite = (xeig<<28) | (yeig<<24) |
@@ -183,6 +183,7 @@ coords_t vdu5_paint(gcontext_t *gc, font_t fh, int x, int y,
   };
   if (strsize == -1)
     strsize = strlen(str);
+
   if (strsize == 0)
   {
     end.x = x;
@@ -191,8 +192,14 @@ coords_t vdu5_paint(gcontext_t *gc, font_t fh, int x, int y,
   }
   if (gc->clipstate != cs_suppress)
   {
-      move(x, y + (ysize * 28 / 32));
+      dprintf("Baseline : %i, %i\n", x, y);
+      dprintf("Font size : %i, %i\n", xsize, ysize);
+      dprintf("Top left : %i, %i\n", x, y + (ysize * 28) / 32);
+      move(x, y + (ysize * 28) / 32);
       gcol(fg);
+      /* Convert to pixels from OS units */
+      xsize = xsize >> xeig;
+      ysize = ysize >> yeig;
       seq[5] = (int)(xsize % 256);
       seq[6] = (int)(xsize / 256);
       seq[7] = (int)(ysize % 256);

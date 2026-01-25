@@ -16,6 +16,7 @@
 #endif
 
 #include "font.h"
+#include "vdu5.h"
 #include "gcontext.h"
 
 /* Define this to debug this file */
@@ -389,4 +390,189 @@ retry_left:
 #endif
 
     return end;
+}
+
+
+
+
+
+struct fontfallback_s {
+    int32_t handle;
+    int32_t xsize, ysize;
+    int32_t ascent, descent;
+
+    bounds_t em; /* This is the width and height of an em */
+
+    /* Fallback VDU 5 font */
+    font_t vdu5font;
+};
+
+typedef struct fontfallback_s *fontfallback_t;
+
+
+/*************************************************** Gerph *********
+ Function:     fontfallback_findfont
+ Description:  Find a font
+ Parameters:   gc-> graphics context
+               fontname-> the name of the font to find
+               xsize = the size (points * 16)
+               ysize = the size (points * 16)
+ Returns:      font handle, or FONT_NONE if could not claim
+ ******************************************************************/
+font_t fontfallback_findfont(gcontext_t *gc, const char *fontname, int xsize, int ysize)
+{
+  _kernel_oserror *err;
+  fontfallback_t font = calloc(1, sizeof(*font));
+  if (font == 0)
+    return FONT_NONE;
+  err = _swix(Font_FindFont, _INR(1,5)|_OUT(0), fontname, xsize, ysize, 0, 0,
+                                                &font->handle);
+  if (err)
+  {
+    dprintf("FAILED: Could not find font %s\n", fontname);
+    goto fallback;
+  }
+  font->xsize = xsize;
+  font->ysize = ysize;
+  font->ascent = 0;
+  font->descent = 0;
+
+  /* Values that aren't cached yet */
+  font->em.width = -1;
+  font->em.height = -1;
+  return (font_t)font;
+
+fallback:
+  font->handle = 0;
+  font->vdu5font = vdu5_findfont(gc, fontname, xsize, ysize);
+  return (font_t)font;
+}
+
+/*************************************************** Gerph *********
+ Function:     fontfallback_losefont
+ Description:  Lose a font we've claimed
+ Parameters:   gc-> graphics context
+               font = the handle to lose
+ Returns:      none
+ ******************************************************************/
+void fontfallback_losefont(gcontext_t *gc, font_t font)
+{
+    fontfallback_t fontf = (fontfallback_t)font;
+    if (fontf == NULL)
+      return;
+    if (fontf->handle)
+    {
+        font_losefont(gc, font);
+    }
+    else
+    {
+        vdu5_losefont(gc, fontf->vdu5font);
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     fontfallback_paint
+ Description:  Paint our font somewhere
+ Parameters:   gc-> graphics context
+               font = the font handle
+               x = the x position to plot at (OS units)
+               y = the y position to plot at (OS units)
+                   (of the left base line)
+               bg,fg = colours to use
+               str-> the string to plot
+               len = the number of characters to plot, or -1 for all
+ Returns:      coords_t for the end position
+ ******************************************************************/
+coords_t fontfallback_paint(gcontext_t *gc, font_t font, int x, int y,
+                            colour_t bg, colour_t fg,
+                            const char *str, int len)
+{
+    fontfallback_t fontf = (fontfallback_t)font;
+    if (font->handle)
+    {
+        return font_paint(gc, font, x, y, bg, fg, str, len);
+    }
+    else
+    {
+        return vdu5_paint(gc, fontf->vdu5font, x, y, bg, fg, str, len);
+    }
+}
+
+
+/*************************************************** Gerph *********
+ Function:     fontfallback_getem
+ Description:  Return the em size
+ Parameters:   gc-> graphics context
+               font = the font handle, or NULL for system font
+               bounds-> the box to fill in
+ Returns:      bounds for the em
+ ******************************************************************/
+bounds_t fontfallback_getem(gcontext_t *gc, font_t font)
+{
+    fontfallback_t fontf = (fontfallback_t)font;
+    if (fontf->handle)
+    {
+        return font_getem(gc, font);
+    }
+    else
+    {
+        return vdu5_getem(gc, fontf->vdu5font);
+    }
+}
+
+
+/*************************************************** Gerph *********
+ Function:     fontfallback_getstringsize
+ Description:  Return the size of the string into the structure
+ Parameters:   gc-> graphics context
+               font = the font handle, or NULL for system font
+               bounds-> the box to fill in
+               xlimit = the widest the string may be in OS units, or -1 for unlimited
+               str-> the string to read
+               len = the number of characters to process, or -1 for all
+               splitchar = character to split on, or 0 for none
+ Returns:      none
+ ******************************************************************/
+void fontfallback_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
+                                int32_t xlimit,
+                                const char *str, int len, char split_char)
+{
+    fontfallback_t fontf = (fontfallback_t)font;
+    if (fontf->handle)
+    {
+        font_getstringsize(gc, font, bounds, xlimit, str, len, split_char);
+    }
+    else
+    {
+        vdu5_getstringsize(gc, fontf->vdu5font, bounds, xlimit, str, len, split_char);
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     fontfallback_paintattrib
+ Description:  Put a string, with the given attributes
+ Parameters:   gc-> graphics context
+               font = the handle to plot with
+               x0,y0,x1,y1 = box to centre in
+               str-> the string to use
+               strsize = the length to use
+               bg,fg = colour to use
+               attrib = the attributes to use
+ Returns:      coords_t for the end position
+ ******************************************************************/
+coords_t fontfallback_paintattrib(gcontext_t *gc, font_t font,
+                                  int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                                  const char *str, int32_t strsize,
+                                  colour_t bg, colour_t fg,
+                                  uint32_t attrib)
+{
+    fontfallback_t fontf = (fontfallback_t)font;
+    if (fontf->handle)
+    {
+        return font_paintattrib(gc, font, x0, y0, x1, y1, str, strsize, bg, fg, attrib);
+    }
+    else
+    {
+        return vdu5_paintattrib(gc, fontf->vdu5font, x0, y0, x1, y1, str, strsize, bg, fg, attrib);
+    }
 }
