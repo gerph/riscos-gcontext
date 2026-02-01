@@ -88,6 +88,7 @@ typedef struct gcontext_s {
                             const char *name, int xsize, int ysize);
     void (*text_losefont)(struct gcontext_s *gc,
                           font_t handle);
+    uint32_t (*text_readhandle)(struct gcontext_s *gc, font_t font);
 
     void (*text_getstringsize)(struct gcontext_s *gc,
                                font_t, stringbounds_t *bounds,

@@ -31,6 +31,15 @@ font_t font_findfont(gcontext_t *gc, const char *fontname, int32_t xsize, int32_
 void font_losefont(gcontext_t *gc, font_t font);
 
 /*************************************************** Gerph *********
+ Function:      font_readhandle
+ Description:   Return the internal handle used by the font implementation
+ Parameters:    gc-> graphics context
+                font = our font handle, to convert to internal handle
+ Returns:       internal handle or 0 if cannot read
+ ******************************************************************/
+uint32_t font_readhandle(struct gcontext_s *gc, font_t font);
+
+/*************************************************** Gerph *********
  Function:     font_getem
  Description:  Return the em size
  Parameters:   gc-> graphics context
@@ -112,6 +121,15 @@ font_t fontfallback_findfont(gcontext_t *gc, const char *fontname, int xsize, in
  Returns:      none
  ******************************************************************/
 void fontfallback_losefont(gcontext_t *gc, font_t font);
+
+/*************************************************** Gerph *********
+ Function:      fontfallback_readhandle
+ Description:   Return the internal handle used by the font implementation
+ Parameters:    gc-> graphics context
+                font = our font handle, to convert to internal handle
+ Returns:       internal handle or 0 if cannot read
+ ******************************************************************/
+uint32_t fontfallback_readhandle(struct gcontext_s *gc, font_t font);
 
 /*************************************************** Gerph *********
  Function:     fontfallback_paint

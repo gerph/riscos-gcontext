@@ -61,6 +61,18 @@ void vdu5_losefont(gcontext_t *gc, font_t fh)
   /* Nothing to do to lose the font */
 }
 
+/*************************************************** Gerph *********
+ Function:      vdu5_readhandle
+ Description:   Return the internal handle used by the font implementation
+ Parameters:    gc-> graphics context
+                font = our font handle, to convert to internal handle
+ Returns:       internal handle or 0 if cannot read
+ ******************************************************************/
+uint32_t vdu5_readhandle(struct gcontext_s *gc, font_t font)
+{
+    return 0;
+}
+
 
 /*************************************************** Gerph *********
  Function:     vdu5_getem
@@ -152,7 +164,8 @@ void vdu5_getstringsize(gcontext_t *gc, font_t fh, stringbounds_t *bounds,
   bounds->descent = (int)(ysize - bounds->ascent);
   bounds->lbearing = 0;
   bounds->rbearing = 0;
-  bounds->xoffset = len;
+  bounds->xoffset = len * xsize;
+  bounds->charoffset = len;
 }
 
 /*************************************************** Gerph *********

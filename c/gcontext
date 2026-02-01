@@ -76,6 +76,7 @@ gcontext_t *gcontext_initvdu(int fonts)
         case 0: /* No fonts */
             gc->text_findfont = vdu5_findfont;
             gc->text_losefont = vdu5_losefont;
+            gc->text_readhandle = vdu5_readhandle;
             gc->text_getstringsize = vdu5_getstringsize;
             gc->text_getemsize = vdu5_getem;
             gc->text_paint = vdu5_paint;
@@ -85,6 +86,7 @@ gcontext_t *gcontext_initvdu(int fonts)
         case 1: /* Fonts always used */
             gc->text_findfont = font_findfont;
             gc->text_losefont = font_losefont;
+            gc->text_readhandle = font_readhandle;
             gc->text_getstringsize = font_getstringsize;
             gc->text_getemsize = font_getem;
             gc->text_paint = font_paint;
@@ -94,6 +96,7 @@ gcontext_t *gcontext_initvdu(int fonts)
         case 2: /* Fonts used if available, fallback to System font */
             gc->text_findfont = fontfallback_findfont;
             gc->text_losefont = fontfallback_losefont;
+            gc->text_readhandle = fontfallback_readhandle;
             gc->text_getstringsize = fontfallback_getstringsize;
             gc->text_getemsize = fontfallback_getem;
             gc->text_paint = fontfallback_paint;

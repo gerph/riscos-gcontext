@@ -31,6 +31,15 @@ font_t vdu5_findfont(gcontext_t *gc, const char *name, int xsize, int ysize);
  ******************************************************************/
 void vdu5_losefont(gcontext_t *gc, font_t fh);
 
+/*************************************************** Gerph *********
+ Function:      vdu5_readhandle
+ Description:   Return the internal handle used by the font implementation
+ Parameters:    gc-> graphics context
+                font = our font handle, to convert to internal handle
+ Returns:       internal handle or 0 if cannot read
+ ******************************************************************/
+uint32_t vdu5_readhandle(struct gcontext_s *gc, font_t font);
+
 
 /*************************************************** Gerph *********
  Function:     vdu5_getem

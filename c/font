@@ -95,6 +95,21 @@ void font_losefont(gcontext_t *gc, font_t font)
 }
 
 /*************************************************** Gerph *********
+ Function:      font_readhandle
+ Description:   Return the internal handle used by the font implementation
+ Parameters:    gc-> graphics context
+                font = our font handle, to convert to internal handle
+ Returns:       internal handle or 0 if cannot read
+ ******************************************************************/
+uint32_t font_readhandle(struct gcontext_s *gc, font_t font)
+{
+  if (font == NULL)
+    return 0;
+  return font->handle;
+}
+
+
+/*************************************************** Gerph *********
  Function:     font_paint
  Description:  Paint our font somewhere
  Parameters:   gc-> graphics context
@@ -467,6 +482,28 @@ void fontfallback_losefont(gcontext_t *gc, font_t font)
     else
     {
         vdu5_losefont(gc, fontf->vdu5font);
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:      fontfallback_readhandle
+ Description:   Return the internal handle used by the font implementation
+ Parameters:    gc-> graphics context
+                font = our font handle, to convert to internal handle
+ Returns:       internal handle or 0 if cannot read
+ ******************************************************************/
+uint32_t fontfallback_readhandle(struct gcontext_s *gc, font_t font)
+{
+    fontfallback_t fontf = (fontfallback_t)font;
+    if (fontf == NULL)
+      return 0;
+    if (fontf->handle)
+    {
+        return fontf->handle;
+    }
+    else
+    {
+        return vdu5_readhandle(gc, fontf->vdu5font);
     }
 }
 
