@@ -215,12 +215,12 @@ bounds_t font_getem(gcontext_t *gc, font_t font)
                xlimit = the widest the string may be in OS units, or -1 for unlimited
                str-> the string to read
                len = the number of characters to process, or -1 for all
-               splitchar = character to split on, or 0 for none
+               splitchar = character to split on, or GCONTEXT_NOSPLIT for none
  Returns:      none
  ******************************************************************/
 void font_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
                         int32_t xlimit,
-                        const char *str, int len, char split_char)
+                        const char *str, int len, int split_char)
 {
   _kernel_oserror *err;
   if (len==-1)
@@ -276,7 +276,7 @@ void font_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
     block[1]=0;
     block[2]=0;
     block[3]=0;
-    block[4] = split_char ? split_char : -1;
+    block[4] = (split_char == GCONTEXT_NOSPLIT) ? -1 : split_char;
     err = _swix(Font_ScanString, _INR(0,7)|_OUT(1)|_OUT(3),
                                  font->handle, str,
                                  (1<<8)|(1<<5)|(1<<18)|(1<<7),
@@ -567,12 +567,12 @@ bounds_t fontfallback_getem(gcontext_t *gc, font_t font)
                xlimit = the widest the string may be in OS units, or -1 for unlimited
                str-> the string to read
                len = the number of characters to process, or -1 for all
-               splitchar = character to split on, or 0 for none
+               splitchar = character to split on, or GCONTEXT_NOSPLIT for none
  Returns:      none
  ******************************************************************/
 void fontfallback_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
                                 int32_t xlimit,
-                                const char *str, int len, char split_char)
+                                const char *str, int len, int split_char)
 {
     fontfallback_t fontf = (fontfallback_t)font;
     if (fontf->handle)

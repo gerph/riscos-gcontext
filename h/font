@@ -63,7 +63,7 @@ bounds_t font_getem(gcontext_t *gc, font_t font);
  ******************************************************************/
 void font_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
                         int32_t xlimit,
-                        const char *str, int32_t strsize, char split_char);
+                        const char *str, int32_t strsize, int split_char);
 
 /*************************************************** Gerph *********
  Function:     font_paint
@@ -167,12 +167,12 @@ bounds_t fontfallback_getem(gcontext_t *gc, font_t font);
                xlimit = the widest the string may be in OS units, or -1 for unlimited
                str-> the string to read
                len = the number of characters to process, or -1 for all
-               splitchar = character to split on, or 0 for none
+               splitchar = character to split on, or GCONTEXT_NOSPLIT for none
  Returns:      none
  ******************************************************************/
 void fontfallback_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
                                 int32_t xlimit,
-                                const char *str, int len, char split_char);
+                                const char *str, int len, int split_char);
 
 /*************************************************** Gerph *********
  Function:     fontfallback_paintattrib

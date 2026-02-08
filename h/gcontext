@@ -53,6 +53,9 @@ typedef struct font_s *font_t;
 /* When no font can be returned */
 #define FONT_NONE ((font_t)(NULL))
 
+/* No split character to be used */
+#define GCONTEXT_NOSPLIT (-1)
+
 typedef struct gcontext_s {
     void (*rectangle_fill)(struct gcontext_s *gc,
                            colour_t colour,
@@ -93,7 +96,7 @@ typedef struct gcontext_s {
     void (*text_getstringsize)(struct gcontext_s *gc,
                                font_t, stringbounds_t *bounds,
                                int32_t xlimit,
-                               const char *str, int strsize, char split_char);
+                               const char *str, int strsize, int split_char);
 
     bounds_t (*text_getemsize)(struct gcontext_s *gc,
                                font_t);

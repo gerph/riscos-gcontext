@@ -105,12 +105,12 @@ bounds_t vdu5_getem(gcontext_t *gc, font_t fh)
                xlimit = the widest the string may be, or -1 for unlimited
                str-> the string to read
                len = the number of characters to process, or -1 for all
-               splitchar = character to split on, or 0 for none
+               splitchar = character to split on, or GCONTEXT_NOSPLIT for none
  Returns:      none
  ******************************************************************/
 void vdu5_getstringsize(gcontext_t *gc, font_t fh, stringbounds_t *bounds,
                         int xlimit,
-                        const char *str, int strsize, char split_char)
+                        const char *str, int strsize, int split_char)
 {
   uint32_t composite = (uint32_t) fh;
   uint32_t xeig = (composite>>28) & 0xF;
@@ -126,10 +126,11 @@ void vdu5_getstringsize(gcontext_t *gc, font_t fh, stringbounds_t *bounds,
   if (xlimit == -1)
     xlimit = 0x7FFFFFFF;
 
+  dprintf("stringsize, str=%s, len=%i, xlimit=%i, split_char = %i\n", str, len, xlimit, split_char);
   if (len * xsize > xlimit)
   {
     /* we only need to worry about splitting if the string would be longer than the limit */
-    if (split_char == 0)
+    if (split_char == GCONTEXT_NOSPLIT)
     {
       len = (int)(xlimit / xsize); /* rounds down, which is what we want */
     }
@@ -155,6 +156,8 @@ void vdu5_getstringsize(gcontext_t *gc, font_t fh, stringbounds_t *bounds,
 
             /* Still more space, so look for the next split point */
             searchp = splitp + 1;
+            /* Update the length we can output */
+            len = splitp - str;
         }
       } while (1);
     }
