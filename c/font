@@ -223,7 +223,7 @@ void font_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
                         const char *str, int len, int split_char)
 {
   _kernel_oserror *err;
-  if (len==-1)
+  if (len == GCONTEXT_ZEROTERM)
     len = strlen(str);
 
   if (font == NULL)
@@ -296,7 +296,7 @@ void font_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
     else
     {
       bounds->lbearing  = FONT_XTOOS(-block[5]);
-      bounds->rbearing  = FONT_XTOOS(block[7]-width);
+      bounds->rbearing  = FONT_XTOOS(block[7] - width);
       bounds->xoffset   = FONT_XTOOS(width);
       bounds->charoffset = endp - str;
     }

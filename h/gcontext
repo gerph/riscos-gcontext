@@ -1,6 +1,8 @@
 /*******************************************************************
  * File:     gcontext
  * Purpose:  Graphics context operations
+ *           For examples of the use of GContext, see:
+ *             https://github.com/gerph/riscos-gcontext-example/
  * Author:   Justin Fletcher
  * Date:     11 Jun 2006
  ******************************************************************/
@@ -22,7 +24,7 @@
 #define FONTATTRIB_UNDERLINE     (1<<4)
 
 #define COLOUR_NONE (0xFFFFFFFFlu)
-#define COLOUR_RGB(r,g,b) ((((int)(r))<<8) | (((int)(g))<<16) | (((int)(b))<<24))
+#define COLOUR_RGB(r,g,b) ((((uint32_t)(r))<<8) | (((uint32_t)(g))<<16) | (((uint32_t)(b))<<24))
 
 typedef uint32_t colour_t;
 
@@ -42,10 +44,10 @@ typedef struct bbox_s {
 } bbox_t;
 
 typedef struct stringbounds_s {
-    int32_t ascent, descent;
-    int32_t lbearing, rbearing;
-    int32_t xoffset;
-    int32_t charoffset;
+    int32_t ascent, descent; /* How far characters go above the baseline, and below */
+    int32_t lbearing, rbearing; /* How far characters go to the left of the origin, and to the right of the xoffset */
+    int32_t xoffset; /* How far along the baseline the next character position is */
+    int32_t charoffset; /* The character offset of the split character */
 } stringbounds_t;
 
 typedef struct font_s *font_t;
@@ -54,7 +56,11 @@ typedef struct font_s *font_t;
 #define FONT_NONE ((font_t)(NULL))
 
 /* No split character to be used */
-#define GCONTEXT_NOSPLIT (-1)
+#define GCONTEXT_NOSPLIT  (-1)
+
+/* Length is the string length terminated by 0 */
+#define GCONTEXT_ZEROTERM (-1)
+
 
 typedef struct gcontext_s {
     void (*rectangle_fill)(struct gcontext_s *gc,
@@ -79,7 +85,7 @@ typedef struct gcontext_s {
     void (*line_end)(struct gcontext_s *gc);
 
     void (*fill_start)(struct gcontext_s *gc,
-                       colour_t fill_colour);
+                       colour_t fill_colour); /* Note: Will be NULL if not supported */
     void (*fill_move)(struct gcontext_s *gc,
                       int32_t x, int32_t y);
     void (*fill_line)(struct gcontext_s *gc,

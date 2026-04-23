@@ -119,7 +119,7 @@ void vdu5_getstringsize(gcontext_t *gc, font_t fh, stringbounds_t *bounds,
   uint32_t ysize = (composite>>0) & 0xFFF;
   int len;
 
-  if (strsize == -1)
+  if (strsize == GCONTEXT_ZEROTERM)
     strsize = strlen(str);
 
   len = strsize;
