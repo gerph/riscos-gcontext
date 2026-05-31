@@ -5,6 +5,7 @@
  * Date:        21 Sep 2020
  ******************************************************************/
 
+#include <stdint.h>
 #include <stdlib.h>
 #include "swis.h"
 
@@ -26,7 +27,7 @@
  ******************************************************************/
 int screen_get_graphics_window(bbox_t *window)
 {
-    static int in[] = {
+    static int32_t in[] = {
             VduVariable_GWLCol,
             VduVariable_GWBRow,
             VduVariable_GWRCol,
@@ -35,7 +36,7 @@ int screen_get_graphics_window(bbox_t *window)
             ModeVariable_YEigFactor,
             -1
         };
-    int out[6];
+    int32_t out[6];
     _kernel_oserror *err;
 
     err = _swix(OS_ReadVduVariables,_INR(0,1),in,out);
@@ -59,7 +60,7 @@ int screen_get_graphics_window(bbox_t *window)
  ******************************************************************/
 int screen_set_graphics_window(bbox_t *window)
 {
-    unsigned long data[3];
+    uint32_t data[3];
 
     if (window == NULL)
     {
@@ -86,14 +87,14 @@ int screen_set_graphics_window(bbox_t *window)
  ******************************************************************/
 int screen_get_size(bounds_t *size)
 {
-    static int in[] = {
+    static int32_t in[] = {
             ModeVariable_XWindLimit,
             ModeVariable_YWindLimit,
             ModeVariable_XEigFactor,
             ModeVariable_YEigFactor,
             -1,
         };
-    int out[4];
+    int32_t out[4];
     _kernel_oserror *err;
 
     err = _swix(OS_ReadVduVariables,_INR(0,1),in,out);
