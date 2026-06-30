@@ -32,6 +32,7 @@ OBJS       = o.border \
              o.font \
              o.clipping \
              o.gcontext \
+             o.gcontext_drawfile \
              o.screen \
              o.vdu5 \
              o.vdushape \
