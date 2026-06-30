@@ -1,0 +1,1914 @@
+/*******************************************************************
+ * File:        gcontext_drawfile
+ * Purpose:     DrawFile-backed graphics context implementation
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "swis.h"
+
+#include "font.h"
+#include "gcontext.h"
+
+/* Define this to debug this file */
+//#define DEBUG
+
+#ifdef DEBUG
+#define dprintf if (1) _swix(0x104,0), printf
+#else
+#define dprintf if (0) _swix(0x104,0), printf
+#endif
+
+#define DRAWFILE_TYPE             (0xAFF)
+#define DRAWFILE_MAGIC            (0x77617244)
+#define DRAWFILE_MAJOR_VERSION    (201)
+#define DRAWFILE_MINOR_VERSION    (0)
+#define DRAWFILE_OBJ_FONTLIST     (0)
+#define DRAWFILE_OBJ_PATH         (2)
+#define DRAWFILE_OBJ_TEXT         (12)
+
+#define DRAWFILE_PATH_MOVE        (2)
+#define DRAWFILE_PATH_CLOSE       (5)
+#define DRAWFILE_PATH_BEZIER      (6)
+#define DRAWFILE_PATH_LINE        (8)
+#define DRAWFILE_PATH_END         (0)
+
+#define DRAWFILE_COLOUR_NONE      (-1)
+#define DRAWFILE_DASH_DOTTED_ON   (32)
+#define DRAWFILE_DASH_DOTTED_OFF  (32)
+#define DRAWFILE_DASH_DASHED_ON   (96)
+#define DRAWFILE_DASH_DASHED_OFF  (48)
+
+typedef enum gcontext_drawfile_target_e
+{
+    gcontext_drawfile_target_file,
+    gcontext_drawfile_target_memory
+} gcontext_drawfile_target_t;
+
+typedef enum gcontext_drawfile_linestyle_e
+{
+    gcontext_drawfile_linestyle_solid,
+    gcontext_drawfile_linestyle_dotted,
+    gcontext_drawfile_linestyle_dashed
+} gcontext_drawfile_linestyle_t;
+
+typedef struct gcontext_drawfile_serial_s
+{
+    unsigned char *data;
+    size_t length;
+    size_t capacity;
+} gcontext_drawfile_serial_t;
+
+typedef struct gcontext_drawfile_font_s
+{
+    struct gcontext_drawfile_font_s *next;
+    font_t handle;
+    char *name;
+    int32_t xsize;
+    int32_t ysize;
+    int32_t identifier;
+    int32_t released;
+} gcontext_drawfile_font_t;
+
+typedef struct gcontext_drawfile_point_s
+{
+    int32_t type;
+    int32_t x;
+    int32_t y;
+} gcontext_drawfile_point_t;
+
+typedef struct gcontext_drawfile_path_s
+{
+    colour_t fill;
+    colour_t line;
+    int32_t linewidth;
+    int32_t style;
+    int32_t dashcount;
+    int32_t dashoffset;
+    int32_t *dashes;
+    int32_t closed;
+    size_t used;
+    size_t allocated;
+    gcontext_drawfile_point_t *points;
+} gcontext_drawfile_path_t;
+
+typedef struct gcontext_drawfile_text_s
+{
+    gcontext_drawfile_font_t *font;
+    char *text;
+    int32_t x;
+    int32_t y;
+    colour_t fill;
+} gcontext_drawfile_text_t;
+
+typedef enum gcontext_drawfile_object_type_e
+{
+    gcontext_drawfile_object_path,
+    gcontext_drawfile_object_text
+} gcontext_drawfile_object_type_t;
+
+typedef struct gcontext_drawfile_object_s
+{
+    struct gcontext_drawfile_object_s *next;
+    gcontext_drawfile_object_type_t type;
+    bbox_t bbox;
+    union
+    {
+        gcontext_drawfile_path_t path;
+        gcontext_drawfile_text_t text;
+    } data;
+} gcontext_drawfile_object_t;
+
+typedef struct gcontext_drawfile_s
+{
+    gcontext_drawfile_target_t target;
+    char *filename;
+    void *memory;
+    size_t memorysize;
+
+    gcontext_drawfile_font_t *fonts;
+    gcontext_drawfile_object_t *head;
+    gcontext_drawfile_object_t *tail;
+
+    gcontext_drawfile_object_t *current_line;
+    gcontext_drawfile_linestyle_t current_linestyle;
+    colour_t current_linecolour;
+
+    gcontext_drawfile_object_t *current_fill;
+    colour_t current_fillcolour;
+
+    gcontext_drawfile_serial_t serialised;
+    int32_t serialised_valid;
+} gcontext_drawfile_t;
+
+static void gcontext_drawfile_line_end(gcontext_t *gc);
+
+
+/*************************************************** Gerph *********
+ Function:     gcontext_generic_rectoutline
+ Description:  Outline a rectangle through the line primitives
+ Parameters:   gc-> graphics context
+               colour = line colour
+               x0,y0,x1,y1 = rectangle corners
+ Returns:      none
+ ******************************************************************/
+static void gcontext_generic_rectoutline(gcontext_t *gc,
+                                         colour_t colour,
+                                         int32_t x0, int32_t y0,
+                                         int32_t x1, int32_t y1)
+{
+    gc->line_start(gc, colour);
+    gc->line_line(gc, x0, y0, x0, y1);
+    gc->line_line(gc, x0, y1, x1, y1);
+    gc->line_line(gc, x1, y1, x1, y0);
+    gc->line_line(gc, x1, y0, x0, y0);
+    gc->line_end(gc);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_colour
+ Description:  Convert a GContext colour to a Draw colour
+ Parameters:   colour = colour to convert
+ Returns:      Draw colour value
+ ******************************************************************/
+static int32_t gcontext_drawfile_colour(colour_t colour)
+{
+    if (colour == COLOUR_NONE)
+        return DRAWFILE_COLOUR_NONE;
+    return (int32_t) colour;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_free_serial
+ Description:  Free any cached serialised data
+ Parameters:   drawfile-> drawfile state
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_free_serial(gcontext_drawfile_t *drawfile)
+{
+    free(drawfile->serialised.data);
+    drawfile->serialised.data = NULL;
+    drawfile->serialised.length = 0;
+    drawfile->serialised.capacity = 0;
+    drawfile->serialised_valid = 0;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_invalidate
+ Description:  Invalidate cached serialised data after a mutation
+ Parameters:   drawfile-> drawfile state
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_invalidate(gcontext_drawfile_t *drawfile)
+{
+    gcontext_drawfile_free_serial(drawfile);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_strdup
+ Description:  Duplicate a string
+ Parameters:   src = source string
+ Returns:      duplicated string or NULL
+ ******************************************************************/
+static char *gcontext_drawfile_strdup(const char *src)
+{
+    char *copy;
+    size_t length;
+
+    if (src == NULL)
+        return NULL;
+
+    length = strlen(src) + 1;
+    copy = malloc(length);
+    if (copy == NULL)
+        return NULL;
+
+    memcpy(copy, src, length);
+    return copy;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_bounds_empty
+ Description:  Create an empty bounding box sentinel
+ Parameters:   none
+ Returns:      empty bounding box
+ ******************************************************************/
+static bbox_t gcontext_drawfile_bounds_empty(void)
+{
+    bbox_t bbox;
+
+    bbox.x0 = 0x7fffffff;
+    bbox.y0 = 0x7fffffff;
+    bbox.x1 = -0x7fffffff;
+    bbox.y1 = -0x7fffffff;
+    return bbox;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_bounds_isempty
+ Description:  Check whether a bounding box is empty
+ Parameters:   bbox-> bounding box
+ Returns:      non-zero if empty
+ ******************************************************************/
+static int gcontext_drawfile_bounds_isempty(const bbox_t *bbox)
+{
+    return bbox->x0 > bbox->x1 || bbox->y0 > bbox->y1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_bounds_include
+ Description:  Expand a bounding box to include a point
+ Parameters:   bbox-> bounding box
+               x,y = point to include
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_bounds_include(bbox_t *bbox, int32_t x, int32_t y)
+{
+    if (x < bbox->x0)
+        bbox->x0 = x;
+    if (y < bbox->y0)
+        bbox->y0 = y;
+    if (x > bbox->x1)
+        bbox->x1 = x;
+    if (y > bbox->y1)
+        bbox->y1 = y;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_bounds_extend
+ Description:  Expand a bounding box to include another bounding box
+ Parameters:   bbox-> destination bounds
+               other-> bounds to include
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_bounds_extend(bbox_t *bbox, const bbox_t *other)
+{
+    if (gcontext_drawfile_bounds_isempty(other))
+        return;
+
+    gcontext_drawfile_bounds_include(bbox, other->x0, other->y0);
+    gcontext_drawfile_bounds_include(bbox, other->x1, other->y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_bounds_intersects
+ Description:  Check whether two bounding boxes intersect
+ Parameters:   bbox-> first bounding box
+               other-> second bounding box
+ Returns:      non-zero if they intersect
+ ******************************************************************/
+static int gcontext_drawfile_bounds_intersects(const bbox_t *bbox,
+                                               const bbox_t *other)
+{
+    if (gcontext_drawfile_bounds_isempty(bbox) ||
+        gcontext_drawfile_bounds_isempty(other))
+        return 0;
+
+    if (bbox->x1 <= other->x0 || bbox->x0 >= other->x1)
+        return 0;
+    if (bbox->y1 <= other->y0 || bbox->y0 >= other->y1)
+        return 0;
+
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_clip_accepts
+ Description:  Check whether an object should be emitted
+ Parameters:   gc-> graphics context
+               bbox-> object bounds
+ Returns:      non-zero if the object should be kept
+ ******************************************************************/
+static int gcontext_drawfile_clip_accepts(gcontext_t *gc, const bbox_t *bbox)
+{
+    if (gc->clipstate == cs_suppress)
+        return 0;
+
+    if (gc->clipstate != cs_clip)
+        return 1;
+
+    return gcontext_drawfile_bounds_intersects(&gc->clipping, bbox);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_free_object
+ Description:  Destroy a drawfile object
+ Parameters:   object-> object to destroy
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_free_object(gcontext_drawfile_object_t *object)
+{
+    if (object == NULL)
+        return;
+
+    switch (object->type)
+    {
+        case gcontext_drawfile_object_path:
+            free(object->data.path.dashes);
+            free(object->data.path.points);
+            break;
+
+        case gcontext_drawfile_object_text:
+            free(object->data.text.text);
+            break;
+    }
+
+    free(object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_append_object
+ Description:  Append an object to the drawfile
+ Parameters:   gc-> graphics context
+               object-> object to append
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_append_object(gcontext_t *gc,
+                                            gcontext_drawfile_object_t *object)
+{
+    gcontext_drawfile_t *drawfile;
+
+    if (object == NULL)
+        return;
+
+    if (!gcontext_drawfile_clip_accepts(gc, &object->bbox))
+    {
+        gcontext_drawfile_free_object(object);
+        return;
+    }
+
+    drawfile = gc->backend_private;
+    object->next = NULL;
+    if (drawfile->tail == NULL)
+        drawfile->head = object;
+    else
+        drawfile->tail->next = object;
+    drawfile->tail = object;
+    gcontext_drawfile_invalidate(drawfile);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serial_reserve
+ Description:  Ensure space in a serial buffer
+ Parameters:   serial-> serial buffer
+               extra = bytes to add
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serial_reserve(gcontext_drawfile_serial_t *serial,
+                                            size_t extra)
+{
+    unsigned char *newdata;
+    size_t wanted;
+    size_t capacity;
+
+    wanted = serial->length + extra;
+    if (wanted <= serial->capacity)
+        return 1;
+
+    capacity = serial->capacity ? serial->capacity : 256;
+    while (capacity < wanted)
+        capacity <<= 1;
+
+    newdata = realloc(serial->data, capacity);
+    if (newdata == NULL)
+        return 0;
+
+    serial->data = newdata;
+    serial->capacity = capacity;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serial_add
+ Description:  Append bytes to a serial buffer
+ Parameters:   serial-> serial buffer
+               data-> data to append
+               length = bytes to append
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serial_add(gcontext_drawfile_serial_t *serial,
+                                        const void *data,
+                                        size_t length)
+{
+    if (length == 0)
+        return 1;
+
+    if (!gcontext_drawfile_serial_reserve(serial, length))
+        return 0;
+
+    memcpy(serial->data + serial->length, data, length);
+    serial->length += length;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serial_addword
+ Description:  Append a 32-bit word to a serial buffer
+ Parameters:   serial-> serial buffer
+               value = value to append
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serial_addword(gcontext_drawfile_serial_t *serial,
+                                            int32_t value)
+{
+    return gcontext_drawfile_serial_add(serial, &value, sizeof(value));
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serial_align4
+ Description:  Align a serial buffer to a word boundary
+ Parameters:   serial-> serial buffer
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serial_align4(gcontext_drawfile_serial_t *serial)
+{
+    static const int32_t zero = 0;
+    size_t pad;
+
+    pad = serial->length & 3;
+    if (pad == 0)
+        return 1;
+
+    pad = 4 - pad;
+    return gcontext_drawfile_serial_add(serial, &zero, pad);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_new_path
+ Description:  Create a path object
+ Parameters:   fill = fill colour
+               line = line colour
+               style = drawfile path style bits
+ Returns:      object or NULL
+ ******************************************************************/
+static gcontext_drawfile_object_t *gcontext_drawfile_new_path(colour_t fill,
+                                                              colour_t line,
+                                                              int32_t style)
+{
+    gcontext_drawfile_object_t *object;
+
+    object = calloc(1, sizeof(*object));
+    if (object == NULL)
+        return NULL;
+
+    object->type = gcontext_drawfile_object_path;
+    object->bbox = gcontext_drawfile_bounds_empty();
+    object->data.path.fill = fill;
+    object->data.path.line = line;
+    object->data.path.style = style;
+    return object;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_path_addpoint
+ Description:  Append a point command to a path object
+ Parameters:   object-> path object
+               type = command type
+               x,y = coordinates
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_path_addpoint(gcontext_drawfile_object_t *object,
+                                           int32_t type,
+                                           int32_t x,
+                                           int32_t y)
+{
+    gcontext_drawfile_path_t *path;
+    gcontext_drawfile_point_t *points;
+    size_t allocated;
+
+    path = &object->data.path;
+    if (path->used == path->allocated)
+    {
+        allocated = path->allocated ? path->allocated * 2 : 8;
+        points = realloc(path->points, allocated * sizeof(*points));
+        if (points == NULL)
+            return 0;
+        path->points = points;
+        path->allocated = allocated;
+    }
+
+    path->points[path->used].type = type;
+    path->points[path->used].x = x;
+    path->points[path->used].y = y;
+    path->used++;
+    gcontext_drawfile_bounds_include(&object->bbox, x, y);
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_path_lastxy
+ Description:  Read the final coordinate in a path
+ Parameters:   object-> path object
+               x = destination for x
+               y = destination for y
+ Returns:      non-zero if a point was found
+ ******************************************************************/
+static int gcontext_drawfile_path_lastxy(gcontext_drawfile_object_t *object,
+                                         int32_t *x,
+                                         int32_t *y)
+{
+    gcontext_drawfile_path_t *path;
+    size_t index;
+
+    path = &object->data.path;
+    if (path->used == 0)
+        return 0;
+
+    index = path->used - 1;
+    *x = path->points[index].x;
+    *y = path->points[index].y;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_path_setdash
+ Description:  Set the dash pattern for a path
+ Parameters:   object-> path object
+               dashes-> dash lengths
+               dashcount = number of dash entries
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_path_setdash(gcontext_drawfile_object_t *object,
+                                          const int32_t *dashes,
+                                          int32_t dashcount)
+{
+    gcontext_drawfile_path_t *path;
+
+    path = &object->data.path;
+    if (dashcount == 0)
+        return 1;
+
+    path->dashes = malloc(sizeof(*path->dashes) * dashcount);
+    if (path->dashes == NULL)
+        return 0;
+
+    memcpy(path->dashes, dashes, sizeof(*path->dashes) * dashcount);
+    path->dashcount = dashcount;
+    path->style |= (1 << 7);
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_path_finalisebbox
+ Description:  Expand a path bounds to include line width
+ Parameters:   object-> path object
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_path_finalisebbox(gcontext_drawfile_object_t *object)
+{
+    int32_t halfwidth;
+
+    halfwidth = object->data.path.linewidth / 2;
+    object->bbox.x0 -= halfwidth;
+    object->bbox.y0 -= halfwidth;
+    object->bbox.x1 += halfwidth;
+    object->bbox.y1 += halfwidth;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_text_bbox
+ Description:  Build a bounding box from string metrics
+ Parameters:   x,y = baseline origin
+               bounds-> measured string bounds
+ Returns:      text bounding box
+ ******************************************************************/
+static bbox_t gcontext_drawfile_text_bbox(int32_t x,
+                                          int32_t y,
+                                          const stringbounds_t *bounds)
+{
+    bbox_t bbox;
+
+    bbox.x0 = x + bounds->lbearing;
+    bbox.y0 = y - bounds->descent;
+    bbox.x1 = x + bounds->xoffset + bounds->rbearing;
+    bbox.y1 = y + bounds->ascent;
+    return bbox;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_findfontrecord
+ Description:  Find a stored font record by handle
+ Parameters:   drawfile-> drawfile state
+               handle = font handle to search for
+ Returns:      font record or NULL
+ ******************************************************************/
+static gcontext_drawfile_font_t *gcontext_drawfile_findfontrecord(gcontext_drawfile_t *drawfile,
+                                                                  font_t handle)
+{
+    gcontext_drawfile_font_t *font;
+
+    font = drawfile->fonts;
+    while (font != NULL)
+    {
+        if (font->handle == handle)
+            return font;
+        font = font->next;
+    }
+    return NULL;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_emit_text
+ Description:  Emit a text object
+ Parameters:   gc-> graphics context
+               handle = font handle
+               x,y = baseline origin
+               bg,fg = colours
+               str = string to paint
+               strsize = string length
+ Returns:      end coordinate
+ ******************************************************************/
+static coords_t gcontext_drawfile_emit_text(gcontext_t *gc,
+                                            font_t handle,
+                                            int32_t x,
+                                            int32_t y,
+                                            colour_t bg,
+                                            colour_t fg,
+                                            const char *str,
+                                            int32_t strsize)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_font_t *font;
+    gcontext_drawfile_object_t *object;
+    stringbounds_t bounds;
+    coords_t end;
+    size_t textlength;
+
+    end.x = x;
+    end.y = y;
+
+    if (strsize == GCONTEXT_ZEROTERM)
+        strsize = strlen(str);
+    if (strsize <= 0)
+        return end;
+
+    drawfile = gc->backend_private;
+    font = gcontext_drawfile_findfontrecord(drawfile, handle);
+
+    gc->text_getstringsize(gc, handle, &bounds, -1, str, strsize, GCONTEXT_NOSPLIT);
+    end.x = x + bounds.xoffset;
+    end.y = y;
+
+    if (bg != COLOUR_NONE)
+    {
+        bbox_t bbox;
+        bbox = gcontext_drawfile_text_bbox(x, y, &bounds);
+        gc->rectangle_fill(gc, bg, bbox.x0, bbox.y0, bbox.x1, bbox.y1);
+    }
+
+    object = calloc(1, sizeof(*object));
+    if (object == NULL)
+        return end;
+
+    textlength = (size_t) strsize + 1;
+    object->data.text.text = malloc(textlength);
+    if (object->data.text.text == NULL)
+    {
+        free(object);
+        return end;
+    }
+
+    memcpy(object->data.text.text, str, (size_t) strsize);
+    object->data.text.text[strsize] = '\0';
+    object->type = gcontext_drawfile_object_text;
+    object->bbox = gcontext_drawfile_text_bbox(x, y, &bounds);
+    object->data.text.font = font;
+    object->data.text.x = x;
+    object->data.text.y = y;
+    object->data.text.fill = fg;
+    gcontext_drawfile_append_object(gc, object);
+
+    return end;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_rectangle_fill
+ Description:  Emit a filled rectangle
+ Parameters:   gc-> graphics context
+               colour = fill colour
+               x0,y0,x1,y1 = rectangle corners
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_rectangle_fill(gcontext_t *gc,
+                                             colour_t colour,
+                                             int32_t x0, int32_t y0,
+                                             int32_t x1, int32_t y1)
+{
+    gcontext_drawfile_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    object = gcontext_drawfile_new_path(colour, (colour_t) COLOUR_NONE, (int32_t) (1 << 6));
+    if (object == NULL)
+        return;
+
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x0, y0) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x0, y1) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y1) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y0))
+    {
+        gcontext_drawfile_free_object(object);
+        return;
+    }
+
+    object->data.path.closed = 1;
+    gcontext_drawfile_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_triangle_fill
+ Description:  Emit a filled triangle
+ Parameters:   gc-> graphics context
+               colour = fill colour
+               x0,y0,x1,y1,x2,y2 = triangle points
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_triangle_fill(gcontext_t *gc,
+                                            colour_t colour,
+                                            int32_t x0, int32_t y0,
+                                            int32_t x1, int32_t y1,
+                                            int32_t x2, int32_t y2)
+{
+    gcontext_drawfile_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    object = gcontext_drawfile_new_path(colour, (colour_t) COLOUR_NONE, (int32_t) (1 << 6));
+    if (object == NULL)
+        return;
+
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x0, y0) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y1) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x2, y2))
+    {
+        gcontext_drawfile_free_object(object);
+        return;
+    }
+
+    object->data.path.closed = 1;
+    gcontext_drawfile_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_create
+ Description:  Create the current line object with a specific style
+ Parameters:   gc-> graphics context
+               colour = line colour
+               linestyle = solid, dotted or dashed
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_line_create(gcontext_t *gc,
+                                         colour_t colour,
+                                         gcontext_drawfile_linestyle_t linestyle)
+{
+    gcontext_drawfile_t *drawfile;
+
+    drawfile = gc->backend_private;
+    if (drawfile->current_line != NULL)
+        return 1;
+
+    drawfile->current_line = gcontext_drawfile_new_path((colour_t) COLOUR_NONE, colour, 0);
+    if (drawfile->current_line == NULL)
+        return 0;
+
+    drawfile->current_linestyle = linestyle;
+    drawfile->current_linecolour = colour;
+    drawfile->current_line->data.path.linewidth = 0;
+
+    if (linestyle == gcontext_drawfile_linestyle_dotted)
+    {
+        static const int32_t dotted[2] = {
+            DRAWFILE_DASH_DOTTED_ON,
+            DRAWFILE_DASH_DOTTED_OFF
+        };
+        if (!gcontext_drawfile_path_setdash(drawfile->current_line, dotted, 2))
+        {
+            gcontext_drawfile_free_object(drawfile->current_line);
+            drawfile->current_line = NULL;
+            return 0;
+        }
+    }
+    else if (linestyle == gcontext_drawfile_linestyle_dashed)
+    {
+        static const int32_t dashed[2] = {
+            DRAWFILE_DASH_DASHED_ON,
+            DRAWFILE_DASH_DASHED_OFF
+        };
+        if (!gcontext_drawfile_path_setdash(drawfile->current_line, dashed, 2))
+        {
+            gcontext_drawfile_free_object(drawfile->current_line);
+            drawfile->current_line = NULL;
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_ensure
+ Description:  Ensure there is a current line object in the requested style
+ Parameters:   gc-> graphics context
+               linestyle = solid, dotted or dashed
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_line_ensure(gcontext_t *gc,
+                                         gcontext_drawfile_linestyle_t linestyle)
+{
+    gcontext_drawfile_t *drawfile;
+
+    drawfile = gc->backend_private;
+    if (drawfile->current_line != NULL &&
+        drawfile->current_linestyle != linestyle &&
+        drawfile->current_line->data.path.used != 0)
+    {
+        gcontext_drawfile_line_end(gc);
+    }
+
+    drawfile->current_linestyle = linestyle;
+    return gcontext_drawfile_line_create(gc, drawfile->current_linecolour, linestyle);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_start
+ Description:  Begin a solid line path
+ Parameters:   gc-> graphics context
+               colour = line colour
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_line_start(gcontext_t *gc, colour_t colour)
+{
+    gcontext_drawfile_t *drawfile;
+
+    drawfile = gc->backend_private;
+    drawfile->current_linecolour = colour;
+    drawfile->current_linestyle = gcontext_drawfile_linestyle_solid;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_add
+ Description:  Add a segment to the current line path
+ Parameters:   gc-> graphics context
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_line_add(gcontext_t *gc,
+                                       gcontext_drawfile_linestyle_t linestyle,
+                                       int32_t x0, int32_t y0,
+                                       int32_t x1, int32_t y1)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_object_t *object;
+    int32_t lastx;
+    int32_t lasty;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    if (!gcontext_drawfile_line_ensure(gc, linestyle))
+        return;
+
+    drawfile = gc->backend_private;
+    object = drawfile->current_line;
+    if (object == NULL)
+        return;
+
+    if (!gcontext_drawfile_path_lastxy(object, &lastx, &lasty) ||
+        lastx != x0 ||
+        lasty != y0)
+    {
+        if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x0, y0))
+        {
+            gcontext_drawfile_free_object(object);
+            drawfile->current_line = NULL;
+            return;
+        }
+    }
+
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y1))
+    {
+        gcontext_drawfile_free_object(object);
+        drawfile->current_line = NULL;
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_line
+ Description:  Add a solid line segment
+ Parameters:   gc-> graphics context
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_line_line(gcontext_t *gc,
+                                        int32_t x0, int32_t y0,
+                                        int32_t x1, int32_t y1)
+{
+    gcontext_drawfile_line_add(gc, gcontext_drawfile_linestyle_solid, x0, y0, x1, y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_dotted
+ Description:  Add a dotted line segment
+ Parameters:   gc-> graphics context
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_line_dotted(gcontext_t *gc,
+                                          int32_t x0, int32_t y0,
+                                          int32_t x1, int32_t y1)
+{
+    gcontext_drawfile_line_add(gc, gcontext_drawfile_linestyle_dotted, x0, y0, x1, y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_dashed
+ Description:  Add a dashed line segment
+ Parameters:   gc-> graphics context
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_line_dashed(gcontext_t *gc,
+                                          int32_t x0, int32_t y0,
+                                          int32_t x1, int32_t y1)
+{
+    gcontext_drawfile_line_add(gc, gcontext_drawfile_linestyle_dashed, x0, y0, x1, y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_line_end
+ Description:  Finish the current line path
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_line_end(gcontext_t *gc)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_object_t *object;
+
+    drawfile = gc->backend_private;
+    object = drawfile->current_line;
+    drawfile->current_line = NULL;
+    if (object == NULL)
+        return;
+
+    if (object->data.path.used < 2)
+    {
+        gcontext_drawfile_free_object(object);
+        return;
+    }
+
+    gcontext_drawfile_path_finalisebbox(object);
+    gcontext_drawfile_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_fill_start
+ Description:  Begin collecting a filled polygon
+ Parameters:   gc-> graphics context
+               fill_colour = polygon fill colour
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_fill_start(gcontext_t *gc, colour_t fill_colour)
+{
+    gcontext_drawfile_t *drawfile;
+
+    drawfile = gc->backend_private;
+    if (drawfile->current_fill != NULL)
+        return;
+
+    drawfile->current_fill = gcontext_drawfile_new_path(fill_colour, (colour_t) COLOUR_NONE, (int32_t) (1 << 6));
+    if (drawfile->current_fill == NULL)
+        return;
+    drawfile->current_fillcolour = fill_colour;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_fill_move
+ Description:  Move within the current fill polygon
+ Parameters:   gc-> graphics context
+               x,y = coordinate to move to
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_fill_move(gcontext_t *gc, int32_t x, int32_t y)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    drawfile = gc->backend_private;
+    object = drawfile->current_fill;
+    if (object == NULL)
+        return;
+
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x, y))
+    {
+        gcontext_drawfile_free_object(object);
+        drawfile->current_fill = NULL;
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_fill_line
+ Description:  Add a line in the current fill polygon
+ Parameters:   gc-> graphics context
+               x,y = coordinate to draw to
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_fill_line(gcontext_t *gc, int32_t x, int32_t y)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    drawfile = gc->backend_private;
+    object = drawfile->current_fill;
+    if (object == NULL)
+        return;
+
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x, y))
+    {
+        gcontext_drawfile_free_object(object);
+        drawfile->current_fill = NULL;
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_fill_close
+ Description:  Close the current fill polygon
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_fill_close(gcontext_t *gc)
+{
+    gcontext_drawfile_t *drawfile;
+
+    drawfile = gc->backend_private;
+    if (drawfile->current_fill != NULL)
+        drawfile->current_fill->data.path.closed = 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_fill_end
+ Description:  Finish the current fill polygon
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_fill_end(gcontext_t *gc)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_object_t *object;
+
+    drawfile = gc->backend_private;
+    object = drawfile->current_fill;
+    drawfile->current_fill = NULL;
+    if (object == NULL)
+        return;
+
+    if (object->data.path.used < 2)
+    {
+        gcontext_drawfile_free_object(object);
+        return;
+    }
+
+    gcontext_drawfile_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_findfont
+ Description:  Find a font and remember its metadata
+ Parameters:   gc-> graphics context
+               name = font name
+               xsize,ysize = point sizes * 16
+ Returns:      font handle
+ ******************************************************************/
+static font_t gcontext_drawfile_findfont(gcontext_t *gc,
+                                         const char *name,
+                                         int32_t xsize,
+                                         int32_t ysize)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_font_t *font;
+    font_t handle;
+    char *fontname;
+
+    drawfile = gc->backend_private;
+    handle = fontfallback_findfont(gc, name, xsize, ysize);
+    if (gcontext_drawfile_findfontrecord(drawfile, handle) != NULL)
+        return handle;
+
+    font = calloc(1, sizeof(*font));
+    if (font == NULL)
+    {
+        fontfallback_losefont(gc, handle);
+        return FONT_NONE;
+    }
+
+    fontname = gcontext_drawfile_strdup(name ? name : "Trinity.Medium");
+    if (fontname == NULL)
+    {
+        free(font);
+        fontfallback_losefont(gc, handle);
+        return FONT_NONE;
+    }
+
+    font->handle = handle;
+    font->name = fontname;
+    font->xsize = xsize;
+    font->ysize = ysize;
+    font->next = drawfile->fonts;
+    drawfile->fonts = font;
+    return handle;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_losefont
+ Description:  Release a stored font record
+ Parameters:   gc-> graphics context
+               handle = font handle to release
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_losefont(gcontext_t *gc, font_t handle)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_font_t *font;
+
+    drawfile = gc->backend_private;
+    font = drawfile->fonts;
+    while (font != NULL)
+    {
+        if (font->handle == handle)
+        {
+            if (!font->released)
+            {
+                fontfallback_losefont(gc, handle);
+                font->released = 1;
+                font->handle = FONT_NONE;
+            }
+            return;
+        }
+        font = font->next;
+    }
+
+    fontfallback_losefont(gc, handle);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_readhandle
+ Description:  Read the underlying font handle
+ Parameters:   gc-> graphics context
+               font = font handle to read
+ Returns:      internal font handle
+ ******************************************************************/
+static uint32_t gcontext_drawfile_readhandle(gcontext_t *gc, font_t font)
+{
+    return fontfallback_readhandle(gc, font);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_getstringsize
+ Description:  Measure a string
+ Parameters:   gc-> graphics context
+               font = font handle to use
+               bounds-> bounds to fill in
+               xlimit = width limit
+               str = text to scan
+               strsize = length of text
+               split_char = split character
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_getstringsize(gcontext_t *gc,
+                                            font_t font,
+                                            stringbounds_t *bounds,
+                                            int32_t xlimit,
+                                            const char *str,
+                                            int32_t strsize,
+                                            int split_char)
+{
+    fontfallback_getstringsize(gc, font, bounds, xlimit, str, strsize, split_char);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_getem
+ Description:  Measure an em square
+ Parameters:   gc-> graphics context
+               font = font handle to use
+ Returns:      em size
+ ******************************************************************/
+static bounds_t gcontext_drawfile_getem(gcontext_t *gc, font_t font)
+{
+    return fontfallback_getem(gc, font);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_paint
+ Description:  Emit a text object
+ Parameters:   gc-> graphics context
+               handle = font handle
+               xb,yb = baseline origin
+               bg,fg = colours
+               str = string to paint
+               strsize = string length
+ Returns:      end coordinate
+ ******************************************************************/
+static coords_t gcontext_drawfile_paint(gcontext_t *gc,
+                                        font_t handle,
+                                        int32_t xb,
+                                        int32_t yb,
+                                        colour_t bg,
+                                        colour_t fg,
+                                        const char *str,
+                                        int32_t strsize)
+{
+    return gcontext_drawfile_emit_text(gc, handle, xb, yb, bg, fg, str, strsize);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_paintattrib
+ Description:  Emit aligned text and underline if requested
+ Parameters:   gc-> graphics context
+               handle = font handle
+               x0,y0,x1,y1 = enclosing box
+               str = string to paint
+               strsize = string length
+               bg,fg = colours
+               attrib = alignment attributes
+ Returns:      end coordinate
+ ******************************************************************/
+static coords_t gcontext_drawfile_paintattrib(gcontext_t *gc,
+                                              font_t handle,
+                                              int32_t x0, int32_t y0,
+                                              int32_t x1, int32_t y1,
+                                              const char *str,
+                                              int32_t strsize,
+                                              colour_t bg,
+                                              colour_t fg,
+                                              uint32_t attrib)
+{
+    stringbounds_t bounds;
+    int32_t strwidth;
+    int32_t strheight;
+    int32_t x;
+    int32_t y;
+    coords_t end;
+
+    end.x = x0;
+    end.y = y0;
+
+    gcontext_drawfile_getstringsize(gc, handle, &bounds, -1, str, strsize, GCONTEXT_NOSPLIT);
+    strwidth = bounds.lbearing + bounds.rbearing + bounds.xoffset;
+    strheight = bounds.ascent + bounds.descent;
+
+    switch (attrib & FONTATTRIB_ALIGN_HMASK)
+    {
+        default:
+        case FONTATTRIB_ALIGN_HLEFT:
+retry_left:
+            x = x0 + bounds.lbearing;
+            break;
+
+        case FONTATTRIB_ALIGN_HRIGHT:
+            x = x1 - strwidth + bounds.lbearing;
+            break;
+
+        case FONTATTRIB_ALIGN_HCENTRE:
+            x = (x0 + x1 - strwidth) / 2 + bounds.lbearing;
+            if (x < x0)
+                goto retry_left;
+            break;
+    }
+    end.x = x + bounds.xoffset;
+
+    switch (attrib & FONTATTRIB_ALIGN_VMASK)
+    {
+        default:
+        case FONTATTRIB_ALIGN_VTOP:
+            y = y1 - strheight + bounds.descent;
+            if (y < y0)
+                return end;
+            end.y = y1;
+            break;
+
+        case FONTATTRIB_ALIGN_VBOTTOM:
+            y = y0 + bounds.descent;
+            if (y + bounds.ascent > y1)
+                return end;
+            end.y = y0;
+            break;
+
+        case FONTATTRIB_ALIGN_VCENTRE:
+            y = (y0 + y1 - strheight) / 2 + bounds.descent;
+            end.y = y - bounds.descent;
+            break;
+    }
+
+    if (gc->clipstate != cs_suppress)
+    {
+        gcontext_drawfile_emit_text(gc, handle, x, y, bg, fg, str, strsize);
+        if (attrib & FONTATTRIB_UNDERLINE)
+        {
+            gc->line_start(gc, fg);
+            gc->line_line(gc, x, y, x + bounds.xoffset, y);
+            gc->line_end(gc);
+        }
+    }
+
+    return end;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_clip_rectangle
+ Description:  Update the clipping state for drawfile output
+ Parameters:   gc-> graphics context
+               bbox-> bounding box, or NULL to reset
+ Returns:      false, as drawfile clipping is only approximated
+ ******************************************************************/
+static bool gcontext_drawfile_clip_rectangle(gcontext_t *gc, bbox_t *bbox)
+{
+    if (bbox == NULL)
+    {
+        gc->clipstate = cs_noclip;
+    }
+    else if (bbox->x0 >= bbox->x1 || bbox->y0 >= bbox->y1)
+    {
+        gc->clipstate = cs_suppress;
+        gc->clipping.x0 = 0;
+        gc->clipping.y0 = 0;
+        gc->clipping.x1 = 1;
+        gc->clipping.y1 = 1;
+    }
+    else
+    {
+        gc->clipstate = cs_clip;
+        gc->clipping = *bbox;
+    }
+    return false;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serialise_fonttable
+ Description:  Serialise the DrawFile font table object
+ Parameters:   drawfile-> drawfile state
+               serial-> serial buffer to append to
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serialise_fonttable(gcontext_drawfile_t *drawfile,
+                                                 gcontext_drawfile_serial_t *serial)
+{
+    gcontext_drawfile_object_t *object;
+    gcontext_drawfile_font_t *font;
+    gcontext_drawfile_serial_t payload;
+    int32_t objectsize;
+    int32_t identifier;
+
+    memset(&payload, 0, sizeof(payload));
+    identifier = 1;
+
+    object = drawfile->head;
+    while (object != NULL)
+    {
+        if (object->type == gcontext_drawfile_object_text)
+        {
+            font = object->data.text.font;
+            if (font != NULL && font->identifier == 0)
+            {
+                font->identifier = identifier++;
+                if (!gcontext_drawfile_serial_add(&payload, &font->identifier, 1) ||
+                    !gcontext_drawfile_serial_add(&payload, font->name, strlen(font->name) + 1))
+                {
+                    free(payload.data);
+                    return 0;
+                }
+            }
+        }
+        object = object->next;
+    }
+
+    if (payload.length == 0)
+    {
+        free(payload.data);
+        return 1;
+    }
+
+    if (!gcontext_drawfile_serial_align4(&payload))
+    {
+        free(payload.data);
+        return 0;
+    }
+
+    objectsize = (int32_t) payload.length + 8;
+    if (!gcontext_drawfile_serial_addword(serial, DRAWFILE_OBJ_FONTLIST) ||
+        !gcontext_drawfile_serial_addword(serial, objectsize) ||
+        !gcontext_drawfile_serial_add(serial, payload.data, payload.length))
+    {
+        free(payload.data);
+        return 0;
+    }
+
+    free(payload.data);
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serialise_path
+ Description:  Serialise a path object into a payload buffer
+ Parameters:   object-> path object
+               serial-> payload buffer
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serialise_path(const gcontext_drawfile_object_t *object,
+                                            gcontext_drawfile_serial_t *serial)
+{
+    const gcontext_drawfile_path_t *path;
+    size_t index;
+
+    path = &object->data.path;
+    if (!gcontext_drawfile_serial_addword(serial, gcontext_drawfile_colour(path->fill)) ||
+        !gcontext_drawfile_serial_addword(serial, gcontext_drawfile_colour(path->line)) ||
+        !gcontext_drawfile_serial_addword(serial, path->linewidth))
+        return 0;
+
+    if (!gcontext_drawfile_serial_addword(serial, path->style))
+        return 0;
+
+    if (path->dashcount != 0)
+    {
+        if (!gcontext_drawfile_serial_addword(serial, path->dashoffset) ||
+            !gcontext_drawfile_serial_addword(serial, path->dashcount))
+            return 0;
+
+        for (index = 0; index < (size_t) path->dashcount; index++)
+        {
+            if (!gcontext_drawfile_serial_addword(serial, path->dashes[index]))
+                return 0;
+        }
+    }
+
+    for (index = 0; index < path->used; index++)
+    {
+        if (!gcontext_drawfile_serial_addword(serial, path->points[index].type) ||
+            !gcontext_drawfile_serial_addword(serial, path->points[index].x) ||
+            !gcontext_drawfile_serial_addword(serial, path->points[index].y))
+            return 0;
+    }
+
+    if (path->closed)
+    {
+        if (!gcontext_drawfile_serial_addword(serial, DRAWFILE_PATH_CLOSE))
+            return 0;
+    }
+
+    return gcontext_drawfile_serial_addword(serial, DRAWFILE_PATH_END);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serialise_text
+ Description:  Serialise a text object into a payload buffer
+ Parameters:   object-> text object
+               serial-> payload buffer
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serialise_text(const gcontext_drawfile_object_t *object,
+                                            gcontext_drawfile_serial_t *serial)
+{
+    const gcontext_drawfile_text_t *text;
+    int32_t identifier;
+
+    text = &object->data.text;
+    identifier = (text->font == NULL) ? 0 : text->font->identifier;
+
+    if (!gcontext_drawfile_serial_addword(serial, 1 << 16) ||
+        !gcontext_drawfile_serial_addword(serial, 0) ||
+        !gcontext_drawfile_serial_addword(serial, 0) ||
+        !gcontext_drawfile_serial_addword(serial, 1 << 16) ||
+        !gcontext_drawfile_serial_addword(serial, 0) ||
+        !gcontext_drawfile_serial_addword(serial, 0) ||
+        !gcontext_drawfile_serial_addword(serial, 0) ||
+        !gcontext_drawfile_serial_addword(serial, gcontext_drawfile_colour(text->fill)) ||
+        !gcontext_drawfile_serial_addword(serial, DRAWFILE_COLOUR_NONE) ||
+        !gcontext_drawfile_serial_addword(serial, identifier) ||
+        !gcontext_drawfile_serial_addword(serial, (text->font == NULL) ? (12 << 4) : text->font->xsize) ||
+        !gcontext_drawfile_serial_addword(serial, (text->font == NULL) ? (12 << 4) : text->font->ysize) ||
+        !gcontext_drawfile_serial_addword(serial, text->x) ||
+        !gcontext_drawfile_serial_addword(serial, text->y) ||
+        !gcontext_drawfile_serial_add(serial, text->text, strlen(text->text) + 1) ||
+        !gcontext_drawfile_serial_align4(serial))
+        return 0;
+
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_serialise_object
+ Description:  Serialise a DrawFile object with its header
+ Parameters:   object-> object to serialise
+               serial-> destination serial buffer
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_drawfile_serialise_object(const gcontext_drawfile_object_t *object,
+                                              gcontext_drawfile_serial_t *serial)
+{
+    gcontext_drawfile_serial_t payload;
+    int32_t tag;
+    int32_t size;
+
+    memset(&payload, 0, sizeof(payload));
+    switch (object->type)
+    {
+        case gcontext_drawfile_object_path:
+            tag = DRAWFILE_OBJ_PATH;
+            if (!gcontext_drawfile_serialise_path(object, &payload))
+            {
+                free(payload.data);
+                return 0;
+            }
+            break;
+
+        case gcontext_drawfile_object_text:
+            tag = DRAWFILE_OBJ_TEXT;
+            if (!gcontext_drawfile_serialise_text(object, &payload))
+            {
+                free(payload.data);
+                return 0;
+            }
+            break;
+
+        default:
+            free(payload.data);
+            return 0;
+    }
+
+    size = (int32_t) payload.length + 24;
+    if (!gcontext_drawfile_serial_addword(serial, tag) ||
+        !gcontext_drawfile_serial_addword(serial, size) ||
+        !gcontext_drawfile_serial_addword(serial, object->bbox.x0) ||
+        !gcontext_drawfile_serial_addword(serial, object->bbox.y0) ||
+        !gcontext_drawfile_serial_addword(serial, object->bbox.x1) ||
+        !gcontext_drawfile_serial_addword(serial, object->bbox.y1) ||
+        !gcontext_drawfile_serial_add(serial, payload.data, payload.length))
+    {
+        free(payload.data);
+        return 0;
+    }
+
+    free(payload.data);
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_build_serialised
+ Description:  Build the serialised DrawFile into the cache
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+static int32_t gcontext_drawfile_build_serialised(gcontext_t *gc)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_object_t *object;
+    bbox_t bounds;
+    char creator[12];
+
+    drawfile = gc->backend_private;
+    if (drawfile->serialised_valid)
+        return (int32_t) drawfile->serialised.length;
+
+    gcontext_drawfile_free_serial(drawfile);
+    bounds = gcontext_drawfile_bounds_empty();
+    object = drawfile->head;
+    while (object != NULL)
+    {
+        gcontext_drawfile_bounds_extend(&bounds, &object->bbox);
+        object = object->next;
+    }
+    if (gcontext_drawfile_bounds_isempty(&bounds))
+    {
+        bounds.x0 = 0;
+        bounds.y0 = 0;
+        bounds.x1 = 0;
+        bounds.y1 = 0;
+    }
+
+    memset(creator, ' ', sizeof(creator));
+    memcpy(creator, "GContext", 8);
+
+    object = drawfile->head;
+    while (object != NULL)
+    {
+        if (object->type == gcontext_drawfile_object_text &&
+            object->data.text.font != NULL)
+            object->data.text.font->identifier = 0;
+        object = object->next;
+    }
+
+    if (!gcontext_drawfile_serial_addword(&drawfile->serialised, DRAWFILE_MAGIC) ||
+        !gcontext_drawfile_serial_addword(&drawfile->serialised, DRAWFILE_MAJOR_VERSION) ||
+        !gcontext_drawfile_serial_addword(&drawfile->serialised, DRAWFILE_MINOR_VERSION) ||
+        !gcontext_drawfile_serial_add(&drawfile->serialised, creator, sizeof(creator)) ||
+        !gcontext_drawfile_serial_addword(&drawfile->serialised, bounds.x0) ||
+        !gcontext_drawfile_serial_addword(&drawfile->serialised, bounds.y0) ||
+        !gcontext_drawfile_serial_addword(&drawfile->serialised, bounds.x1) ||
+        !gcontext_drawfile_serial_addword(&drawfile->serialised, bounds.y1) ||
+        !gcontext_drawfile_serialise_fonttable(drawfile, &drawfile->serialised))
+    {
+        gcontext_drawfile_free_serial(drawfile);
+        return -1;
+    }
+
+    object = drawfile->head;
+    while (object != NULL)
+    {
+        if (!gcontext_drawfile_serialise_object(object, &drawfile->serialised))
+        {
+            gcontext_drawfile_free_serial(drawfile);
+            return -1;
+        }
+        object = object->next;
+    }
+
+    drawfile->serialised_valid = 1;
+    return (int32_t) drawfile->serialised.length;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_backend_finalise
+ Description:  Finalise drawfile output to the configured destination
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+static int32_t gcontext_drawfile_backend_finalise(gcontext_t *gc)
+{
+    gcontext_drawfile_t *drawfile;
+    int32_t size;
+
+    drawfile = gc->backend_private;
+    size = gcontext_drawfile_build_serialised(gc);
+    if (size < 0)
+        return -1;
+
+    if (drawfile->target == gcontext_drawfile_target_file)
+    {
+        FILE *handle;
+
+        handle = fopen(drawfile->filename, "wb");
+        if (handle == NULL)
+            return -1;
+
+        if (fwrite(drawfile->serialised.data, 1, drawfile->serialised.length, handle) != drawfile->serialised.length)
+        {
+            fclose(handle);
+            remove(drawfile->filename);
+            return -1;
+        }
+        fclose(handle);
+        _swix(OS_File, _INR(0,2), 18, drawfile->filename, DRAWFILE_TYPE);
+    }
+    else
+    {
+        if ((size_t) size > drawfile->memorysize)
+            return -1;
+        if (drawfile->memory != NULL && size != 0)
+            memcpy(drawfile->memory, drawfile->serialised.data, (size_t) size);
+    }
+
+    return size;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_backend_datasize
+ Description:  Report the serialised size for the drawfile backend
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+static int32_t gcontext_drawfile_backend_datasize(gcontext_t *gc)
+{
+    return gcontext_drawfile_build_serialised(gc);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_backend_destroy
+ Description:  Destroy the drawfile backend state
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_drawfile_backend_destroy(gcontext_t *gc)
+{
+    gcontext_drawfile_t *drawfile;
+    gcontext_drawfile_font_t *font;
+    gcontext_drawfile_font_t *nextfont;
+    gcontext_drawfile_object_t *object;
+    gcontext_drawfile_object_t *nextobject;
+
+    drawfile = gc->backend_private;
+    if (drawfile == NULL)
+        return;
+
+    if (drawfile->current_line != NULL)
+        gcontext_drawfile_free_object(drawfile->current_line);
+    if (drawfile->current_fill != NULL)
+        gcontext_drawfile_free_object(drawfile->current_fill);
+
+    object = drawfile->head;
+    while (object != NULL)
+    {
+        nextobject = object->next;
+        gcontext_drawfile_free_object(object);
+        object = nextobject;
+    }
+
+    font = drawfile->fonts;
+    while (font != NULL)
+    {
+        nextfont = font->next;
+        if (!font->released && font->handle != FONT_NONE)
+            fontfallback_losefont(gc, font->handle);
+        free(font->name);
+        free(font);
+        font = nextfont;
+    }
+
+    gcontext_drawfile_free_serial(drawfile);
+    free(drawfile->filename);
+    free(drawfile);
+    gc->backend_private = NULL;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initdrawfile_common
+ Description:  Create a DrawFile-backed graphics context
+ Parameters:   target = file or memory destination type
+               filename = destination filename for file output
+               memory = destination memory for memory output
+               memorysize = size of destination memory buffer
+ Returns:      graphics context or NULL
+ ******************************************************************/
+static gcontext_t *gcontext_initdrawfile_common(gcontext_drawfile_target_t target,
+                                                const char *filename,
+                                                void *memory,
+                                                size_t memorysize)
+{
+    gcontext_t *gc;
+    gcontext_drawfile_t *drawfile;
+
+    gc = calloc(1, sizeof(*gc));
+    if (gc == NULL)
+        return NULL;
+
+    drawfile = calloc(1, sizeof(*drawfile));
+    if (drawfile == NULL)
+    {
+        free(gc);
+        return NULL;
+    }
+
+    if (filename != NULL)
+    {
+        drawfile->filename = gcontext_drawfile_strdup(filename);
+        if (drawfile->filename == NULL)
+        {
+            free(drawfile);
+            free(gc);
+            return NULL;
+        }
+    }
+
+    drawfile->target = target;
+    drawfile->memory = memory;
+    drawfile->memorysize = memorysize;
+
+    gc->rectangle_fill = gcontext_drawfile_rectangle_fill;
+    gc->rectangle_outline = gcontext_generic_rectoutline;
+    gc->triangle_fill = gcontext_drawfile_triangle_fill;
+    gc->line_start = gcontext_drawfile_line_start;
+    gc->line_line = gcontext_drawfile_line_line;
+    gc->line_dotted = gcontext_drawfile_line_dotted;
+    gc->line_dashed = gcontext_drawfile_line_dashed;
+    gc->line_end = gcontext_drawfile_line_end;
+    gc->fill_start = gcontext_drawfile_fill_start;
+    gc->fill_move = gcontext_drawfile_fill_move;
+    gc->fill_line = gcontext_drawfile_fill_line;
+    gc->fill_close = gcontext_drawfile_fill_close;
+    gc->fill_end = gcontext_drawfile_fill_end;
+    gc->text_findfont = gcontext_drawfile_findfont;
+    gc->text_losefont = gcontext_drawfile_losefont;
+    gc->text_readhandle = gcontext_drawfile_readhandle;
+    gc->text_getstringsize = gcontext_drawfile_getstringsize;
+    gc->text_getemsize = gcontext_drawfile_getem;
+    gc->text_paint = gcontext_drawfile_paint;
+    gc->text_paintattrib = gcontext_drawfile_paintattrib;
+    gc->clip_rectangle = gcontext_drawfile_clip_rectangle;
+    gc->backend_destroy = gcontext_drawfile_backend_destroy;
+    gc->backend_finalise = gcontext_drawfile_backend_finalise;
+    gc->backend_datasize = gcontext_drawfile_backend_datasize;
+    gc->backend_private = drawfile;
+    gc->clipstate = cs_noclip;
+
+    return gc;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initdrawfile
+ Description:  Initialise a DrawFile-backed graphics context for file output
+ Parameters:   filename = destination filename
+ Returns:      graphics context or NULL
+ ******************************************************************/
+gcontext_t *gcontext_initdrawfile(const char *filename)
+{
+    if (filename == NULL)
+        return NULL;
+
+    return gcontext_initdrawfile_common(gcontext_drawfile_target_file,
+                                        filename,
+                                        NULL,
+                                        0);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initdrawfilememory
+ Description:  Initialise a DrawFile-backed graphics context for memory output
+ Parameters:   memory = destination memory, or NULL to size only
+               memorysize = size of destination memory
+ Returns:      graphics context or NULL
+ ******************************************************************/
+gcontext_t *gcontext_initdrawfilememory(void *memory, size_t memorysize)
+{
+    return gcontext_initdrawfile_common(gcontext_drawfile_target_memory,
+                                        NULL,
+                                        memory,
+                                        memorysize);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_finalise
+ Description:  Serialise a DrawFile-backed graphics context
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+int32_t gcontext_drawfile_finalise(struct gcontext_s *gc)
+{
+    if (gc == NULL || gc->backend_finalise == NULL)
+        return -1;
+
+    return gc->backend_finalise(gc);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_datasize
+ Description:  Report the size of the DrawFile data for a graphics context
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if unavailable
+ ******************************************************************/
+int32_t gcontext_drawfile_datasize(struct gcontext_s *gc)
+{
+    if (gc == NULL || gc->backend_datasize == NULL)
+        return -1;
+
+    return gc->backend_datasize(gc);
+}

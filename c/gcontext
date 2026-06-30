@@ -114,3 +114,20 @@ gcontext_t *gcontext_initvdu(int fonts)
 
     return gc;
 }
+
+/*************************************************** Gerph *********
+ Function:     gcontext_destroy
+ Description:  Release a graphics context and its backend state
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+void gcontext_destroy(struct gcontext_s *gc)
+{
+    if (gc == NULL)
+        return;
+
+    if (gc->backend_destroy != NULL)
+        gc->backend_destroy(gc);
+
+    free(gc);
+}
