@@ -62,6 +62,7 @@ typedef struct font_s *font_t;
 /* Length is the string length terminated by 0 */
 #define GCONTEXT_ZEROTERM (-1)
 
+/* Backend-specific public entry points are declared in this header. */
 
 typedef struct gcontext_s {
     void (*rectangle_fill)(struct gcontext_s *gc,
