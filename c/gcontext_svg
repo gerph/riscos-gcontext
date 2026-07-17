@@ -1,0 +1,2093 @@
+/*******************************************************************
+ * File:        gcontext_svg
+ * Purpose:     SVG-backed graphics context implementation
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "swis.h"
+
+#include "font.h"
+#include "gcontext.h"
+
+/* Define this to debug this file */
+//#define DEBUG
+
+#ifdef DEBUG
+#define dprintf if (1) _swix(0x104,0), printf
+#else
+#define dprintf if (0) _swix(0x104,0), printf
+#endif
+
+#define SVG_FILETYPE              (0xAAD)
+
+#define SVG_DASH_DOTTED_ON        (32)
+#define SVG_DASH_DOTTED_OFF       (32)
+#define SVG_DASH_DASHED_ON        (96)
+#define SVG_DASH_DASHED_OFF       (48)
+
+typedef enum gcontext_svg_target_e
+{
+    gcontext_svg_target_file,
+    gcontext_svg_target_memory
+} gcontext_svg_target_t;
+
+typedef enum gcontext_svg_linestyle_e
+{
+    gcontext_svg_linestyle_solid,
+    gcontext_svg_linestyle_dotted,
+    gcontext_svg_linestyle_dashed
+} gcontext_svg_linestyle_t;
+
+typedef enum gcontext_svg_pointtype_e
+{
+    gcontext_svg_point_move,
+    gcontext_svg_point_line
+} gcontext_svg_pointtype_t;
+
+typedef struct gcontext_svg_serial_s
+{
+    char *data;
+    size_t length;
+    size_t capacity;
+} gcontext_svg_serial_t;
+
+typedef struct gcontext_svg_font_s
+{
+    struct gcontext_svg_font_s *next;
+    font_t handle;
+    char *name;
+    int32_t xsize;
+    int32_t ysize;
+    int32_t released;
+} gcontext_svg_font_t;
+
+typedef struct gcontext_svg_point_s
+{
+    gcontext_svg_pointtype_t type;
+    int32_t x;
+    int32_t y;
+} gcontext_svg_point_t;
+
+typedef struct gcontext_svg_path_s
+{
+    colour_t fill;
+    colour_t line;
+    int32_t linewidth;
+    gcontext_svg_linestyle_t linestyle;
+    int32_t closed;
+    size_t used;
+    size_t allocated;
+    gcontext_svg_point_t *points;
+} gcontext_svg_path_t;
+
+typedef struct gcontext_svg_text_s
+{
+    gcontext_svg_font_t *font;
+    char *text;
+    int32_t x;
+    int32_t y;
+    colour_t fill;
+} gcontext_svg_text_t;
+
+typedef enum gcontext_svg_object_type_e
+{
+    gcontext_svg_object_path,
+    gcontext_svg_object_text
+} gcontext_svg_object_type_t;
+
+typedef struct gcontext_svg_object_s
+{
+    struct gcontext_svg_object_s *next;
+    gcontext_svg_object_type_t type;
+    bbox_t bbox;
+    int32_t clipped;
+    bbox_t clip;
+    union
+    {
+        gcontext_svg_path_t path;
+        gcontext_svg_text_t text;
+    } data;
+} gcontext_svg_object_t;
+
+typedef struct gcontext_svg_s
+{
+    gcontext_svg_target_t target;
+    char *filename;
+    void *memory;
+    size_t memorysize;
+
+    gcontext_svg_font_t *fonts;
+    gcontext_svg_object_t *head;
+    gcontext_svg_object_t *tail;
+
+    gcontext_svg_object_t *current_line;
+    gcontext_svg_linestyle_t current_linestyle;
+    colour_t current_linecolour;
+
+    gcontext_svg_object_t *current_fill;
+    colour_t current_fillcolour;
+
+    gcontext_svg_serial_t serialised;
+    int32_t serialised_valid;
+} gcontext_svg_t;
+
+static void gcontext_svg_line_end(gcontext_t *gc);
+
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_rectoutline
+ Description:  Outline a rectangle through the line primitives
+ Parameters:   gc-> graphics context
+               colour = line colour
+               x0,y0,x1,y1 = rectangle corners
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_rectoutline(gcontext_t *gc,
+                                     colour_t colour,
+                                     int32_t x0, int32_t y0,
+                                     int32_t x1, int32_t y1)
+{
+    gc->line_start(gc, colour);
+    gc->line_line(gc, x0, y0, x0, y1);
+    gc->line_line(gc, x0, y1, x1, y1);
+    gc->line_line(gc, x1, y1, x1, y0);
+    gc->line_line(gc, x1, y0, x0, y0);
+    gc->line_end(gc);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_free_serial
+ Description:  Free any cached serialised data
+ Parameters:   svg-> svg state
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_free_serial(gcontext_svg_t *svg)
+{
+    free(svg->serialised.data);
+    svg->serialised.data = NULL;
+    svg->serialised.length = 0;
+    svg->serialised.capacity = 0;
+    svg->serialised_valid = 0;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_invalidate
+ Description:  Invalidate cached serialised data after a mutation
+ Parameters:   svg-> svg state
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_invalidate(gcontext_svg_t *svg)
+{
+    gcontext_svg_free_serial(svg);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_strdup
+ Description:  Duplicate a string
+ Parameters:   src = source string
+ Returns:      duplicated string or NULL
+ ******************************************************************/
+static char *gcontext_svg_strdup(const char *src)
+{
+    char *copy;
+    size_t length;
+
+    if (src == NULL)
+        return NULL;
+
+    length = strlen(src) + 1;
+    copy = malloc(length);
+    if (copy == NULL)
+        return NULL;
+
+    memcpy(copy, src, length);
+    return copy;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_bounds_empty
+ Description:  Create an empty bounding box sentinel
+ Parameters:   none
+ Returns:      empty bounding box
+ ******************************************************************/
+static bbox_t gcontext_svg_bounds_empty(void)
+{
+    bbox_t bbox;
+
+    bbox.x0 = 0x7fffffff;
+    bbox.y0 = 0x7fffffff;
+    bbox.x1 = -0x7fffffff;
+    bbox.y1 = -0x7fffffff;
+    return bbox;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_bounds_isempty
+ Description:  Check whether a bounding box is empty
+ Parameters:   bbox-> bounding box
+ Returns:      non-zero if empty
+ ******************************************************************/
+static int gcontext_svg_bounds_isempty(const bbox_t *bbox)
+{
+    return bbox->x0 > bbox->x1 || bbox->y0 > bbox->y1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_bounds_include
+ Description:  Expand a bounding box to include a point
+ Parameters:   bbox-> bounding box
+               x,y = point to include
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_bounds_include(bbox_t *bbox, int32_t x, int32_t y)
+{
+    if (x < bbox->x0)
+        bbox->x0 = x;
+    if (y < bbox->y0)
+        bbox->y0 = y;
+    if (x > bbox->x1)
+        bbox->x1 = x;
+    if (y > bbox->y1)
+        bbox->y1 = y;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_bounds_extend
+ Description:  Expand a bounding box to include another bounding box
+ Parameters:   bbox-> destination bounds
+               other-> bounds to include
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_bounds_extend(bbox_t *bbox, const bbox_t *other)
+{
+    if (gcontext_svg_bounds_isempty(other))
+        return;
+
+    gcontext_svg_bounds_include(bbox, other->x0, other->y0);
+    gcontext_svg_bounds_include(bbox, other->x1, other->y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_bounds_intersects
+ Description:  Check whether two bounding boxes intersect
+ Parameters:   bbox-> first bounding box
+               other-> second bounding box
+ Returns:      non-zero if they intersect
+ ******************************************************************/
+static int gcontext_svg_bounds_intersects(const bbox_t *bbox,
+                                          const bbox_t *other)
+{
+    if (gcontext_svg_bounds_isempty(bbox) ||
+        gcontext_svg_bounds_isempty(other))
+        return 0;
+
+    if (bbox->x1 <= other->x0 || bbox->x0 >= other->x1)
+        return 0;
+    if (bbox->y1 <= other->y0 || bbox->y0 >= other->y1)
+        return 0;
+
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_bounds_contains
+ Description:  Check whether a bounding box wholly contains another
+ Parameters:   bbox-> containing bounding box
+               other-> bounding box to test
+ Returns:      non-zero if other is wholly within bbox
+ ******************************************************************/
+static int gcontext_svg_bounds_contains(const bbox_t *bbox,
+                                        const bbox_t *other)
+{
+    return other->x0 >= bbox->x0 && other->y0 >= bbox->y0 &&
+           other->x1 <= bbox->x1 && other->y1 <= bbox->y1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_bounds_equal
+ Description:  Check whether two bounding boxes are identical
+ Parameters:   bbox-> first bounding box
+               other-> second bounding box
+ Returns:      non-zero if identical
+ ******************************************************************/
+static int gcontext_svg_bounds_equal(const bbox_t *bbox, const bbox_t *other)
+{
+    return bbox->x0 == other->x0 && bbox->y0 == other->y0 &&
+           bbox->x1 == other->x1 && bbox->y1 == other->y1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_clip_accepts
+ Description:  Check whether an object should be emitted
+ Parameters:   gc-> graphics context
+               bbox-> object bounds
+ Returns:      non-zero if the object should be kept
+ ******************************************************************/
+static int gcontext_svg_clip_accepts(gcontext_t *gc, const bbox_t *bbox)
+{
+    if (gc->clipstate == cs_suppress)
+        return 0;
+
+    if (gc->clipstate != cs_clip)
+        return 1;
+
+    return gcontext_svg_bounds_intersects(&gc->clipping, bbox);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_free_object
+ Description:  Destroy an svg object
+ Parameters:   object-> object to destroy
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_free_object(gcontext_svg_object_t *object)
+{
+    if (object == NULL)
+        return;
+
+    switch (object->type)
+    {
+        case gcontext_svg_object_path:
+            free(object->data.path.points);
+            break;
+
+        case gcontext_svg_object_text:
+            free(object->data.text.text);
+            break;
+    }
+
+    free(object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_append_object
+ Description:  Append an object to the svg document
+ Parameters:   gc-> graphics context
+               object-> object to append
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_append_object(gcontext_t *gc,
+                                       gcontext_svg_object_t *object)
+{
+    gcontext_svg_t *svg;
+
+    if (object == NULL)
+        return;
+
+    if (!gcontext_svg_clip_accepts(gc, &object->bbox))
+    {
+        gcontext_svg_free_object(object);
+        return;
+    }
+
+    if (gc->clipstate == cs_clip)
+    {
+        object->clipped = 1;
+        object->clip = gc->clipping;
+    }
+
+    svg = gc->backend_private;
+    object->next = NULL;
+    if (svg->tail == NULL)
+        svg->head = object;
+    else
+        svg->tail->next = object;
+    svg->tail = object;
+    gcontext_svg_invalidate(svg);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serial_reserve
+ Description:  Ensure space in a serial buffer
+ Parameters:   serial-> serial buffer
+               extra = bytes to add
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serial_reserve(gcontext_svg_serial_t *serial,
+                                       size_t extra)
+{
+    char *newdata;
+    size_t wanted;
+    size_t capacity;
+
+    wanted = serial->length + extra + 1;
+    if (wanted <= serial->capacity)
+        return 1;
+
+    capacity = serial->capacity ? serial->capacity : 256;
+    while (capacity < wanted)
+        capacity <<= 1;
+
+    newdata = realloc(serial->data, capacity);
+    if (newdata == NULL)
+        return 0;
+
+    serial->data = newdata;
+    serial->capacity = capacity;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serial_add
+ Description:  Append bytes to a serial buffer
+ Parameters:   serial-> serial buffer
+               data-> data to append
+               length = bytes to append
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serial_add(gcontext_svg_serial_t *serial,
+                                   const char *data,
+                                   size_t length)
+{
+    if (length == 0)
+        return 1;
+
+    if (!gcontext_svg_serial_reserve(serial, length))
+        return 0;
+
+    memcpy(serial->data + serial->length, data, length);
+    serial->length += length;
+    serial->data[serial->length] = '\0';
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serial_addstr
+ Description:  Append a NUL-terminated string to a serial buffer
+ Parameters:   serial-> serial buffer
+               str = string to append
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serial_addstr(gcontext_svg_serial_t *serial,
+                                      const char *str)
+{
+    return gcontext_svg_serial_add(serial, str, strlen(str));
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serial_addint
+ Description:  Append a decimal integer to a serial buffer
+ Parameters:   serial-> serial buffer
+               value = value to append
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serial_addint(gcontext_svg_serial_t *serial,
+                                      int32_t value)
+{
+    char buf[16];
+
+    sprintf(buf, "%ld", (long) value);
+    return gcontext_svg_serial_addstr(serial, buf);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serial_addescaped
+ Description:  Append XML-escaped text to a serial buffer
+ Parameters:   serial-> serial buffer
+               str = text to escape and append
+               length = number of characters to process
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serial_addescaped(gcontext_svg_serial_t *serial,
+                                          const char *str,
+                                          size_t length)
+{
+    size_t index;
+    const char *entity;
+
+    for (index = 0; index < length; index++)
+    {
+        char ch;
+
+        ch = str[index];
+        switch (ch)
+        {
+            case '&':  entity = "&amp;"; break;
+            case '<':  entity = "&lt;"; break;
+            case '>':  entity = "&gt;"; break;
+            case '"':  entity = "&quot;"; break;
+            case '\'': entity = "&apos;"; break;
+            default:   entity = NULL; break;
+        }
+
+        if (entity != NULL)
+        {
+            if (!gcontext_svg_serial_addstr(serial, entity))
+                return 0;
+        }
+        else
+        {
+            if (!gcontext_svg_serial_add(serial, &ch, 1))
+                return 0;
+        }
+    }
+
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_colour_hex
+ Description:  Convert a GContext colour to an SVG colour string
+ Parameters:   colour = colour to convert
+               buf-> destination buffer, at least 8 bytes
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_colour_hex(colour_t colour, char *buf)
+{
+    unsigned long value;
+    unsigned long red, green, blue;
+
+    if (colour == COLOUR_NONE)
+    {
+        strcpy(buf, "none");
+        return;
+    }
+
+    value = (unsigned long) colour;
+    red = (value >> 8) & 0xFFul;
+    green = (value >> 16) & 0xFFul;
+    blue = (value >> 24) & 0xFFul;
+    sprintf(buf, "#%02lx%02lx%02lx", red, green, blue);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_new_path
+ Description:  Create a path object
+ Parameters:   fill = fill colour
+               line = line colour
+               linestyle = solid, dotted or dashed
+ Returns:      object or NULL
+ ******************************************************************/
+static gcontext_svg_object_t *gcontext_svg_new_path(colour_t fill,
+                                                     colour_t line,
+                                                     gcontext_svg_linestyle_t linestyle)
+{
+    gcontext_svg_object_t *object;
+
+    object = calloc(1, sizeof(*object));
+    if (object == NULL)
+        return NULL;
+
+    object->type = gcontext_svg_object_path;
+    object->bbox = gcontext_svg_bounds_empty();
+    object->data.path.fill = fill;
+    object->data.path.line = line;
+    object->data.path.linestyle = linestyle;
+    return object;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_path_addpoint
+ Description:  Append a point command to a path object
+ Parameters:   object-> path object
+               type = move or line
+               x,y = coordinates
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_path_addpoint(gcontext_svg_object_t *object,
+                                      gcontext_svg_pointtype_t type,
+                                      int32_t x,
+                                      int32_t y)
+{
+    gcontext_svg_path_t *path;
+    gcontext_svg_point_t *points;
+    size_t allocated;
+
+    path = &object->data.path;
+    if (path->used == path->allocated)
+    {
+        allocated = path->allocated ? path->allocated * 2 : 8;
+        points = realloc(path->points, allocated * sizeof(*points));
+        if (points == NULL)
+            return 0;
+        path->points = points;
+        path->allocated = allocated;
+    }
+
+    path->points[path->used].type = type;
+    path->points[path->used].x = x;
+    path->points[path->used].y = y;
+    path->used++;
+    gcontext_svg_bounds_include(&object->bbox, x, y);
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_path_lastxy
+ Description:  Read the final coordinate in a path
+ Parameters:   object-> path object
+               x = destination for x
+               y = destination for y
+ Returns:      non-zero if a point was found
+ ******************************************************************/
+static int gcontext_svg_path_lastxy(gcontext_svg_object_t *object,
+                                    int32_t *x,
+                                    int32_t *y)
+{
+    gcontext_svg_path_t *path;
+    size_t index;
+
+    path = &object->data.path;
+    if (path->used == 0)
+        return 0;
+
+    index = path->used - 1;
+    *x = path->points[index].x;
+    *y = path->points[index].y;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_path_finalisebbox
+ Description:  Expand a path bounds to include line width
+ Parameters:   object-> path object
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_path_finalisebbox(gcontext_svg_object_t *object)
+{
+    int32_t halfwidth;
+
+    halfwidth = object->data.path.linewidth / 2;
+    object->bbox.x0 -= halfwidth;
+    object->bbox.y0 -= halfwidth;
+    object->bbox.x1 += halfwidth;
+    object->bbox.y1 += halfwidth;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_text_bbox
+ Description:  Build a bounding box from string metrics
+ Parameters:   x,y = baseline origin
+               bounds-> measured string bounds
+ Returns:      text bounding box
+ ******************************************************************/
+static bbox_t gcontext_svg_text_bbox(int32_t x,
+                                     int32_t y,
+                                     const stringbounds_t *bounds)
+{
+    bbox_t bbox;
+
+    bbox.x0 = x + bounds->lbearing;
+    bbox.y0 = y - bounds->descent;
+    bbox.x1 = x + bounds->xoffset + bounds->rbearing;
+    bbox.y1 = y + bounds->ascent;
+    return bbox;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_findfontrecord
+ Description:  Find a stored font record by handle
+ Parameters:   svg-> svg state
+               handle = font handle to search for
+ Returns:      font record or NULL
+ ******************************************************************/
+static gcontext_svg_font_t *gcontext_svg_findfontrecord(gcontext_svg_t *svg,
+                                                         font_t handle)
+{
+    gcontext_svg_font_t *font;
+
+    font = svg->fonts;
+    while (font != NULL)
+    {
+        if (font->handle == handle)
+            return font;
+        font = font->next;
+    }
+    return NULL;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_emit_text
+ Description:  Emit a text object
+ Parameters:   gc-> graphics context
+               handle = font handle
+               x,y = baseline origin
+               bg,fg = colours
+               str = string to paint
+               strsize = string length
+ Returns:      end coordinate
+ ******************************************************************/
+static coords_t gcontext_svg_emit_text(gcontext_t *gc,
+                                       font_t handle,
+                                       int32_t x,
+                                       int32_t y,
+                                       colour_t bg,
+                                       colour_t fg,
+                                       const char *str,
+                                       int32_t strsize)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_font_t *font;
+    gcontext_svg_object_t *object;
+    stringbounds_t bounds;
+    coords_t end;
+    size_t textlength;
+
+    end.x = x;
+    end.y = y;
+
+    if (strsize == GCONTEXT_ZEROTERM)
+        strsize = strlen(str);
+    if (strsize <= 0)
+        return end;
+
+    svg = gc->backend_private;
+    font = gcontext_svg_findfontrecord(svg, handle);
+
+    gc->text_getstringsize(gc, handle, &bounds, -1, str, strsize, GCONTEXT_NOSPLIT);
+    end.x = x + bounds.xoffset;
+    end.y = y;
+
+    if (bg != COLOUR_NONE)
+    {
+        bbox_t bbox;
+        bbox = gcontext_svg_text_bbox(x, y, &bounds);
+        gc->rectangle_fill(gc, bg, bbox.x0, bbox.y0, bbox.x1, bbox.y1);
+    }
+
+    object = calloc(1, sizeof(*object));
+    if (object == NULL)
+        return end;
+
+    textlength = (size_t) strsize + 1;
+    object->data.text.text = malloc(textlength);
+    if (object->data.text.text == NULL)
+    {
+        free(object);
+        return end;
+    }
+
+    memcpy(object->data.text.text, str, (size_t) strsize);
+    object->data.text.text[strsize] = '\0';
+    object->type = gcontext_svg_object_text;
+    object->bbox = gcontext_svg_text_bbox(x, y, &bounds);
+    object->data.text.font = font;
+    object->data.text.x = x;
+    object->data.text.y = y;
+    object->data.text.fill = fg;
+    gcontext_svg_append_object(gc, object);
+
+    return end;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_rectangle_fill
+ Description:  Emit a filled rectangle
+ Parameters:   gc-> graphics context
+               colour = fill colour
+               x0,y0,x1,y1 = rectangle corners
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_rectangle_fill(gcontext_t *gc,
+                                        colour_t colour,
+                                        int32_t x0, int32_t y0,
+                                        int32_t x1, int32_t y1)
+{
+    gcontext_svg_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    object = gcontext_svg_new_path(colour, (colour_t) COLOUR_NONE, gcontext_svg_linestyle_solid);
+    if (object == NULL)
+        return;
+
+    if (!gcontext_svg_path_addpoint(object, gcontext_svg_point_move, x0, y0) ||
+        !gcontext_svg_path_addpoint(object, gcontext_svg_point_line, x0, y1) ||
+        !gcontext_svg_path_addpoint(object, gcontext_svg_point_line, x1, y1) ||
+        !gcontext_svg_path_addpoint(object, gcontext_svg_point_line, x1, y0))
+    {
+        gcontext_svg_free_object(object);
+        return;
+    }
+
+    object->data.path.closed = 1;
+    gcontext_svg_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_triangle_fill
+ Description:  Emit a filled triangle
+ Parameters:   gc-> graphics context
+               colour = fill colour
+               x0,y0,x1,y1,x2,y2 = triangle points
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_triangle_fill(gcontext_t *gc,
+                                       colour_t colour,
+                                       int32_t x0, int32_t y0,
+                                       int32_t x1, int32_t y1,
+                                       int32_t x2, int32_t y2)
+{
+    gcontext_svg_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    object = gcontext_svg_new_path(colour, (colour_t) COLOUR_NONE, gcontext_svg_linestyle_solid);
+    if (object == NULL)
+        return;
+
+    if (!gcontext_svg_path_addpoint(object, gcontext_svg_point_move, x0, y0) ||
+        !gcontext_svg_path_addpoint(object, gcontext_svg_point_line, x1, y1) ||
+        !gcontext_svg_path_addpoint(object, gcontext_svg_point_line, x2, y2))
+    {
+        gcontext_svg_free_object(object);
+        return;
+    }
+
+    object->data.path.closed = 1;
+    gcontext_svg_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_create
+ Description:  Create the current line object with a specific style
+ Parameters:   gc-> graphics context
+               colour = line colour
+               linestyle = solid, dotted or dashed
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_line_create(gcontext_t *gc,
+                                    colour_t colour,
+                                    gcontext_svg_linestyle_t linestyle)
+{
+    gcontext_svg_t *svg;
+
+    svg = gc->backend_private;
+    if (svg->current_line != NULL)
+        return 1;
+
+    svg->current_line = gcontext_svg_new_path((colour_t) COLOUR_NONE, colour, linestyle);
+    if (svg->current_line == NULL)
+        return 0;
+
+    svg->current_linestyle = linestyle;
+    svg->current_linecolour = colour;
+    svg->current_line->data.path.linewidth = 0;
+
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_ensure
+ Description:  Ensure there is a current line object in the requested style
+ Parameters:   gc-> graphics context
+               linestyle = solid, dotted or dashed
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_line_ensure(gcontext_t *gc,
+                                    gcontext_svg_linestyle_t linestyle)
+{
+    gcontext_svg_t *svg;
+
+    svg = gc->backend_private;
+    if (svg->current_line != NULL &&
+        svg->current_linestyle != linestyle &&
+        svg->current_line->data.path.used != 0)
+    {
+        gcontext_svg_line_end(gc);
+    }
+
+    svg->current_linestyle = linestyle;
+    return gcontext_svg_line_create(gc, svg->current_linecolour, linestyle);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_start
+ Description:  Begin a solid line path
+ Parameters:   gc-> graphics context
+               colour = line colour
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_line_start(gcontext_t *gc, colour_t colour)
+{
+    gcontext_svg_t *svg;
+
+    svg = gc->backend_private;
+    svg->current_linecolour = colour;
+    svg->current_linestyle = gcontext_svg_linestyle_solid;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_add
+ Description:  Add a segment to the current line path
+ Parameters:   gc-> graphics context
+               linestyle = solid, dotted or dashed
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_line_add(gcontext_t *gc,
+                                  gcontext_svg_linestyle_t linestyle,
+                                  int32_t x0, int32_t y0,
+                                  int32_t x1, int32_t y1)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_object_t *object;
+    int32_t lastx;
+    int32_t lasty;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    if (!gcontext_svg_line_ensure(gc, linestyle))
+        return;
+
+    svg = gc->backend_private;
+    object = svg->current_line;
+    if (object == NULL)
+        return;
+
+    if (!gcontext_svg_path_lastxy(object, &lastx, &lasty) ||
+        lastx != x0 ||
+        lasty != y0)
+    {
+        if (!gcontext_svg_path_addpoint(object, gcontext_svg_point_move, x0, y0))
+        {
+            gcontext_svg_free_object(object);
+            svg->current_line = NULL;
+            return;
+        }
+    }
+
+    if (!gcontext_svg_path_addpoint(object, gcontext_svg_point_line, x1, y1))
+    {
+        gcontext_svg_free_object(object);
+        svg->current_line = NULL;
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_line
+ Description:  Add a solid line segment
+ Parameters:   gc-> graphics context
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_line_line(gcontext_t *gc,
+                                   int32_t x0, int32_t y0,
+                                   int32_t x1, int32_t y1)
+{
+    gcontext_svg_line_add(gc, gcontext_svg_linestyle_solid, x0, y0, x1, y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_dotted
+ Description:  Add a dotted line segment
+ Parameters:   gc-> graphics context
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_line_dotted(gcontext_t *gc,
+                                     int32_t x0, int32_t y0,
+                                     int32_t x1, int32_t y1)
+{
+    gcontext_svg_line_add(gc, gcontext_svg_linestyle_dotted, x0, y0, x1, y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_dashed
+ Description:  Add a dashed line segment
+ Parameters:   gc-> graphics context
+               x0,y0,x1,y1 = segment coordinates
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_line_dashed(gcontext_t *gc,
+                                     int32_t x0, int32_t y0,
+                                     int32_t x1, int32_t y1)
+{
+    gcontext_svg_line_add(gc, gcontext_svg_linestyle_dashed, x0, y0, x1, y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_line_end
+ Description:  Finish the current line path
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_line_end(gcontext_t *gc)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_object_t *object;
+
+    svg = gc->backend_private;
+    object = svg->current_line;
+    svg->current_line = NULL;
+    if (object == NULL)
+        return;
+
+    if (object->data.path.used < 2)
+    {
+        gcontext_svg_free_object(object);
+        return;
+    }
+
+    gcontext_svg_path_finalisebbox(object);
+    gcontext_svg_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_fill_start
+ Description:  Begin collecting a filled polygon
+ Parameters:   gc-> graphics context
+               fill_colour = polygon fill colour
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_fill_start(gcontext_t *gc, colour_t fill_colour)
+{
+    gcontext_svg_t *svg;
+
+    svg = gc->backend_private;
+    if (svg->current_fill != NULL)
+        return;
+
+    svg->current_fill = gcontext_svg_new_path(fill_colour, (colour_t) COLOUR_NONE, gcontext_svg_linestyle_solid);
+    if (svg->current_fill == NULL)
+        return;
+    svg->current_fillcolour = fill_colour;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_fill_move
+ Description:  Move within the current fill polygon
+ Parameters:   gc-> graphics context
+               x,y = coordinate to move to
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_fill_move(gcontext_t *gc, int32_t x, int32_t y)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    svg = gc->backend_private;
+    object = svg->current_fill;
+    if (object == NULL)
+        return;
+
+    if (!gcontext_svg_path_addpoint(object, gcontext_svg_point_move, x, y))
+    {
+        gcontext_svg_free_object(object);
+        svg->current_fill = NULL;
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_fill_line
+ Description:  Add a line in the current fill polygon
+ Parameters:   gc-> graphics context
+               x,y = coordinate to draw to
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_fill_line(gcontext_t *gc, int32_t x, int32_t y)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_object_t *object;
+
+    if (gc->clipstate == cs_suppress)
+        return;
+
+    svg = gc->backend_private;
+    object = svg->current_fill;
+    if (object == NULL)
+        return;
+
+    if (!gcontext_svg_path_addpoint(object, gcontext_svg_point_line, x, y))
+    {
+        gcontext_svg_free_object(object);
+        svg->current_fill = NULL;
+    }
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_fill_close
+ Description:  Close the current fill polygon
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_fill_close(gcontext_t *gc)
+{
+    gcontext_svg_t *svg;
+
+    svg = gc->backend_private;
+    if (svg->current_fill != NULL)
+        svg->current_fill->data.path.closed = 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_fill_end
+ Description:  Finish the current fill polygon
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_fill_end(gcontext_t *gc)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_object_t *object;
+
+    svg = gc->backend_private;
+    object = svg->current_fill;
+    svg->current_fill = NULL;
+    if (object == NULL)
+        return;
+
+    if (object->data.path.used < 2)
+    {
+        gcontext_svg_free_object(object);
+        return;
+    }
+
+    gcontext_svg_append_object(gc, object);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_findfont
+ Description:  Find a font and remember its metadata
+ Parameters:   gc-> graphics context
+               name = font name
+               xsize,ysize = point sizes * 16
+ Returns:      font handle
+ ******************************************************************/
+static font_t gcontext_svg_findfont(gcontext_t *gc,
+                                    const char *name,
+                                    int32_t xsize,
+                                    int32_t ysize)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_font_t *font;
+    font_t handle;
+    char *fontname;
+
+    svg = gc->backend_private;
+    handle = fontfallback_findfont(gc, name, xsize, ysize);
+    if (gcontext_svg_findfontrecord(svg, handle) != NULL)
+        return handle;
+
+    font = calloc(1, sizeof(*font));
+    if (font == NULL)
+    {
+        fontfallback_losefont(gc, handle);
+        return FONT_NONE;
+    }
+
+    fontname = gcontext_svg_strdup(name ? name : "Trinity.Medium");
+    if (fontname == NULL)
+    {
+        free(font);
+        fontfallback_losefont(gc, handle);
+        return FONT_NONE;
+    }
+
+    font->handle = handle;
+    font->name = fontname;
+    font->xsize = xsize;
+    font->ysize = ysize;
+    font->next = svg->fonts;
+    svg->fonts = font;
+    return handle;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_losefont
+ Description:  Release a stored font record
+ Parameters:   gc-> graphics context
+               handle = font handle to release
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_losefont(gcontext_t *gc, font_t handle)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_font_t *font;
+
+    svg = gc->backend_private;
+    font = svg->fonts;
+    while (font != NULL)
+    {
+        if (font->handle == handle)
+        {
+            if (!font->released)
+            {
+                fontfallback_losefont(gc, handle);
+                font->released = 1;
+                font->handle = FONT_NONE;
+            }
+            return;
+        }
+        font = font->next;
+    }
+
+    fontfallback_losefont(gc, handle);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_readhandle
+ Description:  Read the underlying font handle
+ Parameters:   gc-> graphics context
+               font = font handle to read
+ Returns:      internal font handle
+ ******************************************************************/
+static uint32_t gcontext_svg_readhandle(gcontext_t *gc, font_t font)
+{
+    return fontfallback_readhandle(gc, font);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_getstringsize
+ Description:  Measure a string
+ Parameters:   gc-> graphics context
+               font = font handle to use
+               bounds-> bounds to fill in
+               xlimit = width limit
+               str = text to scan
+               strsize = length of text
+               split_char = split character
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_getstringsize(gcontext_t *gc,
+                                       font_t font,
+                                       stringbounds_t *bounds,
+                                       int32_t xlimit,
+                                       const char *str,
+                                       int32_t strsize,
+                                       int split_char)
+{
+    fontfallback_getstringsize(gc, font, bounds, xlimit, str, strsize, split_char);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_getem
+ Description:  Measure an em square
+ Parameters:   gc-> graphics context
+               font = font handle to use
+ Returns:      em size
+ ******************************************************************/
+static bounds_t gcontext_svg_getem(gcontext_t *gc, font_t font)
+{
+    return fontfallback_getem(gc, font);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_paint
+ Description:  Emit a text object
+ Parameters:   gc-> graphics context
+               handle = font handle
+               xb,yb = baseline origin
+               bg,fg = colours
+               str = string to paint
+               strsize = string length
+ Returns:      end coordinate
+ ******************************************************************/
+static coords_t gcontext_svg_paint(gcontext_t *gc,
+                                   font_t handle,
+                                   int32_t xb,
+                                   int32_t yb,
+                                   colour_t bg,
+                                   colour_t fg,
+                                   const char *str,
+                                   int32_t strsize)
+{
+    return gcontext_svg_emit_text(gc, handle, xb, yb, bg, fg, str, strsize);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_paintattrib
+ Description:  Emit aligned text and underline if requested
+ Parameters:   gc-> graphics context
+               handle = font handle
+               x0,y0,x1,y1 = enclosing box
+               str = string to paint
+               strsize = string length
+               bg,fg = colours
+               attrib = alignment attributes
+ Returns:      end coordinate
+ ******************************************************************/
+static coords_t gcontext_svg_paintattrib(gcontext_t *gc,
+                                         font_t handle,
+                                         int32_t x0, int32_t y0,
+                                         int32_t x1, int32_t y1,
+                                         const char *str,
+                                         int32_t strsize,
+                                         colour_t bg,
+                                         colour_t fg,
+                                         uint32_t attrib)
+{
+    stringbounds_t bounds;
+    int32_t strwidth;
+    int32_t strheight;
+    int32_t x;
+    int32_t y;
+    coords_t end;
+
+    end.x = x0;
+    end.y = y0;
+
+    gcontext_svg_getstringsize(gc, handle, &bounds, -1, str, strsize, GCONTEXT_NOSPLIT);
+    strwidth = bounds.lbearing + bounds.rbearing + bounds.xoffset;
+    strheight = bounds.ascent + bounds.descent;
+
+    switch (attrib & FONTATTRIB_ALIGN_HMASK)
+    {
+        default:
+        case FONTATTRIB_ALIGN_HLEFT:
+retry_left:
+            x = x0 + bounds.lbearing;
+            break;
+
+        case FONTATTRIB_ALIGN_HRIGHT:
+            x = x1 - strwidth + bounds.lbearing;
+            break;
+
+        case FONTATTRIB_ALIGN_HCENTRE:
+            x = (x0 + x1 - strwidth) / 2 + bounds.lbearing;
+            if (x < x0)
+                goto retry_left;
+            break;
+    }
+    end.x = x + bounds.xoffset;
+
+    switch (attrib & FONTATTRIB_ALIGN_VMASK)
+    {
+        default:
+        case FONTATTRIB_ALIGN_VTOP:
+            y = y1 - strheight + bounds.descent;
+            if (y < y0)
+                return end;
+            end.y = y1;
+            break;
+
+        case FONTATTRIB_ALIGN_VBOTTOM:
+            y = y0 + bounds.descent;
+            if (y + bounds.ascent > y1)
+                return end;
+            end.y = y0;
+            break;
+
+        case FONTATTRIB_ALIGN_VCENTRE:
+            y = (y0 + y1 - strheight) / 2 + bounds.descent;
+            end.y = y - bounds.descent;
+            break;
+    }
+
+    if (gc->clipstate != cs_suppress)
+    {
+        gcontext_svg_emit_text(gc, handle, x, y, bg, fg, str, strsize);
+        if (attrib & FONTATTRIB_UNDERLINE)
+        {
+            gc->line_start(gc, fg);
+            gc->line_line(gc, x, y, x + bounds.xoffset, y);
+            gc->line_end(gc);
+        }
+    }
+
+    return end;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_clip_rectangle
+ Description:  Update the clipping state for svg output
+ Parameters:   gc-> graphics context
+               bbox-> bounding box, or NULL to reset
+ Returns:      true, as svg clip regions are fully enforced
+ ******************************************************************/
+static bool gcontext_svg_clip_rectangle(gcontext_t *gc, bbox_t *bbox)
+{
+    if (bbox == NULL)
+    {
+        gc->clipstate = cs_noclip;
+    }
+    else if (bbox->x0 >= bbox->x1 || bbox->y0 >= bbox->y1)
+    {
+        gc->clipstate = cs_suppress;
+        gc->clipping.x0 = 0;
+        gc->clipping.y0 = 0;
+        gc->clipping.x1 = 1;
+        gc->clipping.y1 = 1;
+    }
+    else
+    {
+        gc->clipstate = cs_clip;
+        gc->clipping = *bbox;
+    }
+    return true;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_fontfamily
+ Description:  Map a RISC OS font name to CSS font attributes
+ Parameters:   name = RISC OS font name, or NULL for the system font
+               family-> destination buffer for font-family
+               bold-> destination for bold flag
+               italic-> destination for italic flag
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_fontfamily(const char *name,
+                                    const char **family,
+                                    int *bold,
+                                    int *italic)
+{
+    *family = "sans-serif";
+    *bold = 0;
+    *italic = 0;
+
+    if (name == NULL)
+        return;
+
+    if (strncmp(name, "Trinity", 7) == 0)
+        *family = "serif";
+    else if (strncmp(name, "Homerton", 8) == 0)
+        *family = "sans-serif";
+    else if (strncmp(name, "Corpus", 6) == 0)
+        *family = "monospace";
+
+    if (strstr(name, "Bold") != NULL)
+        *bold = 1;
+    if (strstr(name, "Italic") != NULL || strstr(name, "Oblique") != NULL)
+        *italic = 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serialise_clipdefs
+ Description:  Serialise the <clipPath> definitions used by objects
+ Parameters:   svg-> svg state
+               serial-> destination serial buffer
+               clips-> destination array of unique clip rectangles
+               clipcount-> destination for number of unique clips
+               fx0,fy1 = flip origin (docbounds.x0, docbounds.y1)
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serialise_clipdefs(gcontext_svg_t *svg,
+                                           gcontext_svg_serial_t *serial,
+                                           bbox_t **clips,
+                                           size_t *clipcount,
+                                           int32_t fx0,
+                                           int32_t fy1)
+{
+    gcontext_svg_object_t *object;
+    bbox_t *found;
+    size_t allocated;
+    size_t count;
+    size_t index;
+
+    found = NULL;
+    allocated = 0;
+    count = 0;
+
+    object = svg->head;
+    while (object != NULL)
+    {
+        if (object->clipped)
+        {
+            int seen;
+
+            seen = 0;
+            for (index = 0; index < count; index++)
+            {
+                if (gcontext_svg_bounds_equal(&found[index], &object->clip))
+                {
+                    seen = 1;
+                    break;
+                }
+            }
+
+            if (!seen)
+            {
+                if (count == allocated)
+                {
+                    bbox_t *newfound;
+
+                    allocated = allocated ? allocated * 2 : 4;
+                    newfound = realloc(found, allocated * sizeof(*found));
+                    if (newfound == NULL)
+                    {
+                        free(found);
+                        return 0;
+                    }
+                    found = newfound;
+                }
+                found[count] = object->clip;
+                count++;
+            }
+        }
+        object = object->next;
+    }
+
+    if (count != 0)
+    {
+        if (!gcontext_svg_serial_addstr(serial, "  <defs>\n"))
+        {
+            free(found);
+            return 0;
+        }
+
+        for (index = 0; index < count; index++)
+        {
+            int32_t sx0, sy0, sx1, sy1;
+
+            sx0 = found[index].x0 - fx0;
+            sx1 = found[index].x1 - fx0;
+            sy0 = fy1 - found[index].y1;
+            sy1 = fy1 - found[index].y0;
+
+            if (!gcontext_svg_serial_addstr(serial, "    <clipPath id=\"clip") ||
+                !gcontext_svg_serial_addint(serial, (int32_t) index) ||
+                !gcontext_svg_serial_addstr(serial, "\"><rect x=\"") ||
+                !gcontext_svg_serial_addint(serial, sx0) ||
+                !gcontext_svg_serial_addstr(serial, "\" y=\"") ||
+                !gcontext_svg_serial_addint(serial, sy0) ||
+                !gcontext_svg_serial_addstr(serial, "\" width=\"") ||
+                !gcontext_svg_serial_addint(serial, sx1 - sx0) ||
+                !gcontext_svg_serial_addstr(serial, "\" height=\"") ||
+                !gcontext_svg_serial_addint(serial, sy1 - sy0) ||
+                !gcontext_svg_serial_addstr(serial, "\"/></clipPath>\n"))
+            {
+                free(found);
+                return 0;
+            }
+        }
+
+        if (!gcontext_svg_serial_addstr(serial, "  </defs>\n"))
+        {
+            free(found);
+            return 0;
+        }
+    }
+
+    *clips = found;
+    *clipcount = count;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serialise_clipattr
+ Description:  Emit a clip-path attribute for an object, if required
+ Parameters:   object-> object being serialised
+               serial-> destination serial buffer
+               clips-> unique clip rectangle array
+               clipcount = number of unique clips
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serialise_clipattr(const gcontext_svg_object_t *object,
+                                           gcontext_svg_serial_t *serial,
+                                           const bbox_t *clips,
+                                           size_t clipcount)
+{
+    size_t index;
+
+    if (!object->clipped)
+        return 1;
+
+    if (gcontext_svg_bounds_contains(&object->clip, &object->bbox))
+        return 1;
+
+    for (index = 0; index < clipcount; index++)
+    {
+        if (gcontext_svg_bounds_equal(&clips[index], &object->clip))
+        {
+            return gcontext_svg_serial_addstr(serial, " clip-path=\"url(#clip") &&
+                   gcontext_svg_serial_addint(serial, (int32_t) index) &&
+                   gcontext_svg_serial_addstr(serial, ")\"");
+        }
+    }
+
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serialise_path
+ Description:  Serialise a path object as an SVG <path> element
+ Parameters:   object-> path object
+               serial-> destination serial buffer
+               fx0,fy1 = flip origin (docbounds.x0, docbounds.y1)
+               clips-> unique clip rectangle array
+               clipcount = number of unique clips
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serialise_path(const gcontext_svg_object_t *object,
+                                       gcontext_svg_serial_t *serial,
+                                       int32_t fx0,
+                                       int32_t fy1,
+                                       const bbox_t *clips,
+                                       size_t clipcount)
+{
+    const gcontext_svg_path_t *path;
+    char colourbuf[8];
+    size_t index;
+
+    path = &object->data.path;
+
+    if (!gcontext_svg_serial_addstr(serial, "  <path d=\""))
+        return 0;
+
+    for (index = 0; index < path->used; index++)
+    {
+        int32_t sx, sy;
+
+        sx = path->points[index].x - fx0;
+        sy = fy1 - path->points[index].y;
+
+        if (!gcontext_svg_serial_addstr(serial, path->points[index].type == gcontext_svg_point_move ? "M" : "L") ||
+            !gcontext_svg_serial_addint(serial, sx) ||
+            !gcontext_svg_serial_addstr(serial, ",") ||
+            !gcontext_svg_serial_addint(serial, sy) ||
+            !gcontext_svg_serial_addstr(serial, " "))
+            return 0;
+    }
+
+    if (path->closed)
+    {
+        if (!gcontext_svg_serial_addstr(serial, "Z"))
+            return 0;
+    }
+
+    if (!gcontext_svg_serial_addstr(serial, "\" fill=\""))
+        return 0;
+    gcontext_svg_colour_hex(path->fill, colourbuf);
+    if (!gcontext_svg_serial_addstr(serial, colourbuf) ||
+        !gcontext_svg_serial_addstr(serial, "\" stroke=\""))
+        return 0;
+    gcontext_svg_colour_hex(path->line, colourbuf);
+    if (!gcontext_svg_serial_addstr(serial, colourbuf) ||
+        !gcontext_svg_serial_addstr(serial, "\""))
+        return 0;
+
+    if (path->line != (colour_t) COLOUR_NONE)
+    {
+        if (!gcontext_svg_serial_addstr(serial, " stroke-linecap=\"round\" stroke-linejoin=\"round\""))
+            return 0;
+
+        if (path->linestyle == gcontext_svg_linestyle_dotted)
+        {
+            if (!gcontext_svg_serial_addstr(serial, " stroke-dasharray=\"") ||
+                !gcontext_svg_serial_addint(serial, SVG_DASH_DOTTED_ON) ||
+                !gcontext_svg_serial_addstr(serial, ",") ||
+                !gcontext_svg_serial_addint(serial, SVG_DASH_DOTTED_OFF) ||
+                !gcontext_svg_serial_addstr(serial, "\""))
+                return 0;
+        }
+        else if (path->linestyle == gcontext_svg_linestyle_dashed)
+        {
+            if (!gcontext_svg_serial_addstr(serial, " stroke-dasharray=\"") ||
+                !gcontext_svg_serial_addint(serial, SVG_DASH_DASHED_ON) ||
+                !gcontext_svg_serial_addstr(serial, ",") ||
+                !gcontext_svg_serial_addint(serial, SVG_DASH_DASHED_OFF) ||
+                !gcontext_svg_serial_addstr(serial, "\""))
+                return 0;
+        }
+    }
+
+    if (!gcontext_svg_serialise_clipattr(object, serial, clips, clipcount))
+        return 0;
+
+    return gcontext_svg_serial_addstr(serial, "/>\n");
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_serialise_text
+ Description:  Serialise a text object as an SVG <text> element
+ Parameters:   object-> text object
+               serial-> destination serial buffer
+               fx0,fy1 = flip origin (docbounds.x0, docbounds.y1)
+               clips-> unique clip rectangle array
+               clipcount = number of unique clips
+ Returns:      non-zero if successful
+ ******************************************************************/
+static int gcontext_svg_serialise_text(const gcontext_svg_object_t *object,
+                                       gcontext_svg_serial_t *serial,
+                                       int32_t fx0,
+                                       int32_t fy1,
+                                       const bbox_t *clips,
+                                       size_t clipcount)
+{
+    const gcontext_svg_text_t *text;
+    const char *family;
+    int32_t fontsize;
+    int bold;
+    int italic;
+    char colourbuf[8];
+    int32_t sx, sy;
+
+    text = &object->data.text;
+    fontsize = (object->bbox.y1 - object->bbox.y0);
+    if (fontsize <= 0)
+        fontsize = 1;
+
+    gcontext_svg_fontfamily(text->font != NULL ? text->font->name : NULL, &family, &bold, &italic);
+
+    sx = text->x - fx0;
+    sy = fy1 - text->y;
+
+    if (!gcontext_svg_serial_addstr(serial, "  <text x=\"") ||
+        !gcontext_svg_serial_addint(serial, sx) ||
+        !gcontext_svg_serial_addstr(serial, "\" y=\"") ||
+        !gcontext_svg_serial_addint(serial, sy) ||
+        !gcontext_svg_serial_addstr(serial, "\" font-family=\"") ||
+        !gcontext_svg_serial_addstr(serial, family) ||
+        !gcontext_svg_serial_addstr(serial, "\" font-size=\"") ||
+        !gcontext_svg_serial_addint(serial, fontsize) ||
+        !gcontext_svg_serial_addstr(serial, "\""))
+        return 0;
+
+    if (bold)
+    {
+        if (!gcontext_svg_serial_addstr(serial, " font-weight=\"bold\""))
+            return 0;
+    }
+    if (italic)
+    {
+        if (!gcontext_svg_serial_addstr(serial, " font-style=\"italic\""))
+            return 0;
+    }
+
+    if (!gcontext_svg_serial_addstr(serial, " fill=\""))
+        return 0;
+    gcontext_svg_colour_hex(text->fill, colourbuf);
+    if (!gcontext_svg_serial_addstr(serial, colourbuf) ||
+        !gcontext_svg_serial_addstr(serial, "\""))
+        return 0;
+
+    if (!gcontext_svg_serialise_clipattr(object, serial, clips, clipcount))
+        return 0;
+
+    if (!gcontext_svg_serial_addstr(serial, ">"))
+        return 0;
+
+    if (!gcontext_svg_serial_addescaped(serial, text->text, strlen(text->text)))
+        return 0;
+
+    return gcontext_svg_serial_addstr(serial, "</text>\n");
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_build_serialised
+ Description:  Build the serialised SVG document into the cache
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+static int32_t gcontext_svg_build_serialised(gcontext_t *gc)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_object_t *object;
+    bbox_t bounds;
+    bbox_t *clips;
+    size_t clipcount;
+    int32_t width;
+    int32_t height;
+
+    svg = gc->backend_private;
+    if (svg->serialised_valid)
+        return (int32_t) svg->serialised.length;
+
+    gcontext_svg_free_serial(svg);
+    bounds = gcontext_svg_bounds_empty();
+    object = svg->head;
+    while (object != NULL)
+    {
+        gcontext_svg_bounds_extend(&bounds, &object->bbox);
+        object = object->next;
+    }
+    if (gcontext_svg_bounds_isempty(&bounds))
+    {
+        bounds.x0 = 0;
+        bounds.y0 = 0;
+        bounds.x1 = 0;
+        bounds.y1 = 0;
+    }
+
+    width = bounds.x1 - bounds.x0;
+    height = bounds.y1 - bounds.y0;
+
+    if (!gcontext_svg_serial_addstr(&svg->serialised, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") ||
+        !gcontext_svg_serial_addstr(&svg->serialised, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"") ||
+        !gcontext_svg_serial_addint(&svg->serialised, width) ||
+        !gcontext_svg_serial_addstr(&svg->serialised, "\" height=\"") ||
+        !gcontext_svg_serial_addint(&svg->serialised, height) ||
+        !gcontext_svg_serial_addstr(&svg->serialised, "\" viewBox=\"0 0 ") ||
+        !gcontext_svg_serial_addint(&svg->serialised, width) ||
+        !gcontext_svg_serial_addstr(&svg->serialised, " ") ||
+        !gcontext_svg_serial_addint(&svg->serialised, height) ||
+        !gcontext_svg_serial_addstr(&svg->serialised, "\">\n"))
+    {
+        gcontext_svg_free_serial(svg);
+        return -1;
+    }
+
+    clips = NULL;
+    clipcount = 0;
+    if (!gcontext_svg_serialise_clipdefs(svg, &svg->serialised, &clips, &clipcount, bounds.x0, bounds.y1))
+    {
+        gcontext_svg_free_serial(svg);
+        return -1;
+    }
+
+    object = svg->head;
+    while (object != NULL)
+    {
+        int ok;
+
+        if (object->type == gcontext_svg_object_path)
+            ok = gcontext_svg_serialise_path(object, &svg->serialised, bounds.x0, bounds.y1, clips, clipcount);
+        else
+            ok = gcontext_svg_serialise_text(object, &svg->serialised, bounds.x0, bounds.y1, clips, clipcount);
+
+        if (!ok)
+        {
+            free(clips);
+            gcontext_svg_free_serial(svg);
+            return -1;
+        }
+        object = object->next;
+    }
+
+    free(clips);
+
+    if (!gcontext_svg_serial_addstr(&svg->serialised, "</svg>\n"))
+    {
+        gcontext_svg_free_serial(svg);
+        return -1;
+    }
+
+    svg->serialised_valid = 1;
+    return (int32_t) svg->serialised.length;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_backend_finalise
+ Description:  Finalise SVG output to the configured destination
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+static int32_t gcontext_svg_backend_finalise(gcontext_t *gc)
+{
+    gcontext_svg_t *svg;
+    int32_t size;
+
+    svg = gc->backend_private;
+    size = gcontext_svg_build_serialised(gc);
+    if (size < 0)
+        return -1;
+
+    if (svg->target == gcontext_svg_target_file)
+    {
+        FILE *handle;
+
+        handle = fopen(svg->filename, "wb");
+        if (handle == NULL)
+            return -1;
+
+        if (fwrite(svg->serialised.data, 1, svg->serialised.length, handle) != svg->serialised.length)
+        {
+            fclose(handle);
+            remove(svg->filename);
+            return -1;
+        }
+        fclose(handle);
+        _swix(OS_File, _INR(0,2), 18, svg->filename, SVG_FILETYPE);
+    }
+    else
+    {
+        if ((size_t) size > svg->memorysize)
+            return -1;
+        if (svg->memory != NULL && size != 0)
+            memcpy(svg->memory, svg->serialised.data, (size_t) size);
+    }
+
+    return size;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_backend_datasize
+ Description:  Report the serialised size for the svg backend
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+static int32_t gcontext_svg_backend_datasize(gcontext_t *gc)
+{
+    return gcontext_svg_build_serialised(gc);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_backend_destroy
+ Description:  Destroy the svg backend state
+ Parameters:   gc-> graphics context
+ Returns:      none
+ ******************************************************************/
+static void gcontext_svg_backend_destroy(gcontext_t *gc)
+{
+    gcontext_svg_t *svg;
+    gcontext_svg_font_t *font;
+    gcontext_svg_font_t *nextfont;
+    gcontext_svg_object_t *object;
+    gcontext_svg_object_t *nextobject;
+
+    svg = gc->backend_private;
+    if (svg == NULL)
+        return;
+
+    if (svg->current_line != NULL)
+        gcontext_svg_free_object(svg->current_line);
+    if (svg->current_fill != NULL)
+        gcontext_svg_free_object(svg->current_fill);
+
+    object = svg->head;
+    while (object != NULL)
+    {
+        nextobject = object->next;
+        gcontext_svg_free_object(object);
+        object = nextobject;
+    }
+
+    font = svg->fonts;
+    while (font != NULL)
+    {
+        nextfont = font->next;
+        if (!font->released && font->handle != FONT_NONE)
+            fontfallback_losefont(gc, font->handle);
+        free(font->name);
+        free(font);
+        font = nextfont;
+    }
+
+    gcontext_svg_free_serial(svg);
+    free(svg->filename);
+    free(svg);
+    gc->backend_private = NULL;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initsvg_common
+ Description:  Create an SVG-backed graphics context
+ Parameters:   target = file or memory destination type
+               filename = destination filename for file output
+               memory = destination memory for memory output
+               memorysize = size of destination memory buffer
+ Returns:      graphics context or NULL
+ ******************************************************************/
+static gcontext_t *gcontext_initsvg_common(gcontext_svg_target_t target,
+                                           const char *filename,
+                                           void *memory,
+                                           size_t memorysize)
+{
+    gcontext_t *gc;
+    gcontext_svg_t *svg;
+
+    gc = calloc(1, sizeof(*gc));
+    if (gc == NULL)
+        return NULL;
+
+    svg = calloc(1, sizeof(*svg));
+    if (svg == NULL)
+    {
+        free(gc);
+        return NULL;
+    }
+
+    if (filename != NULL)
+    {
+        svg->filename = gcontext_svg_strdup(filename);
+        if (svg->filename == NULL)
+        {
+            free(svg);
+            free(gc);
+            return NULL;
+        }
+    }
+
+    svg->target = target;
+    svg->memory = memory;
+    svg->memorysize = memorysize;
+
+    gc->rectangle_fill = gcontext_svg_rectangle_fill;
+    gc->rectangle_outline = gcontext_svg_rectoutline;
+    gc->triangle_fill = gcontext_svg_triangle_fill;
+    gc->line_start = gcontext_svg_line_start;
+    gc->line_line = gcontext_svg_line_line;
+    gc->line_dotted = gcontext_svg_line_dotted;
+    gc->line_dashed = gcontext_svg_line_dashed;
+    gc->line_end = gcontext_svg_line_end;
+    gc->fill_start = gcontext_svg_fill_start;
+    gc->fill_move = gcontext_svg_fill_move;
+    gc->fill_line = gcontext_svg_fill_line;
+    gc->fill_close = gcontext_svg_fill_close;
+    gc->fill_end = gcontext_svg_fill_end;
+    gc->text_findfont = gcontext_svg_findfont;
+    gc->text_losefont = gcontext_svg_losefont;
+    gc->text_readhandle = gcontext_svg_readhandle;
+    gc->text_getstringsize = gcontext_svg_getstringsize;
+    gc->text_getemsize = gcontext_svg_getem;
+    gc->text_paint = gcontext_svg_paint;
+    gc->text_paintattrib = gcontext_svg_paintattrib;
+    gc->clip_rectangle = gcontext_svg_clip_rectangle;
+    gc->backend_destroy = gcontext_svg_backend_destroy;
+    gc->backend_finalise = gcontext_svg_backend_finalise;
+    gc->backend_datasize = gcontext_svg_backend_datasize;
+    gc->backend_private = svg;
+    gc->clipstate = cs_noclip;
+
+    return gc;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initsvg
+ Description:  Initialise an SVG-backed graphics context for file output
+ Parameters:   filename = destination filename
+ Returns:      graphics context or NULL
+ ******************************************************************/
+gcontext_t *gcontext_initsvg(const char *filename)
+{
+    if (filename == NULL)
+        return NULL;
+
+    return gcontext_initsvg_common(gcontext_svg_target_file,
+                                   filename,
+                                   NULL,
+                                   0);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initsvgmemory
+ Description:  Initialise an SVG-backed graphics context for memory output
+ Parameters:   memory = destination memory, or NULL to size only
+               memorysize = size of destination memory
+ Returns:      graphics context or NULL
+ ******************************************************************/
+gcontext_t *gcontext_initsvgmemory(void *memory, size_t memorysize)
+{
+    return gcontext_initsvg_common(gcontext_svg_target_memory,
+                                   NULL,
+                                   memory,
+                                   memorysize);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_finalise
+ Description:  Serialise an SVG-backed graphics context
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+int32_t gcontext_svg_finalise(struct gcontext_s *gc)
+{
+    if (gc == NULL || gc->backend_finalise == NULL)
+        return -1;
+
+    return gc->backend_finalise(gc);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_datasize
+ Description:  Report the size of the SVG data for a graphics context
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if unavailable
+ ******************************************************************/
+int32_t gcontext_svg_datasize(struct gcontext_s *gc)
+{
+    if (gc == NULL || gc->backend_datasize == NULL)
+        return -1;
+
+    return gc->backend_datasize(gc);
+}

@@ -1,0 +1,333 @@
+/*******************************************************************
+ * File:        test_svg
+ * Purpose:     Exercise the SVG-backed GContext APIs
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "swis.h"
+
+#include "gcontext.h"
+
+#define TEST_SVG_OUTPUT_FILE   "test_svg_file"
+#define TEST_SVG_OUTPUT_MEMORY "test_svg_memory"
+#define TEST_SVG_TYPE          (0xAAD)
+
+#define TEST_FONT_NAME  "Trinity.Medium.Italic"
+#define TEST_FONT_XSIZE (12 * 16)
+#define TEST_FONT_YSIZE (12 * 16)
+
+
+/*************************************************** Gerph *********
+ Function:      test_svg_write_file
+ Description:   Write a memory buffer to an SVG file
+ Parameters:    filename = destination filename
+                data = buffer to write
+                length = bytes to write
+ Returns:       0 if successful, 1 if failed
+ ******************************************************************/
+static int test_svg_write_file(const char *filename,
+                               const unsigned char *data,
+                               size_t length)
+{
+    FILE *handle;
+
+    handle = fopen(filename, "wb");
+    if (handle == NULL)
+        return 1;
+
+    if (fwrite(data, 1, length, handle) != length)
+    {
+        fclose(handle);
+        remove(filename);
+        return 1;
+    }
+
+    fclose(handle);
+    _swix(OS_File, _INR(0,2), 18, filename, TEST_SVG_TYPE);
+    return 0;
+}
+
+/*************************************************** Gerph *********
+ Function:      test_svg_read_file
+ Description:   Read a file into memory
+ Parameters:    filename = filename to read
+                data = returned buffer
+                length = returned buffer size
+ Returns:       0 if successful, 1 if failed
+ ******************************************************************/
+static int test_svg_read_file(const char *filename,
+                              unsigned char **data,
+                              size_t *length)
+{
+    FILE *handle;
+    long file_length;
+    unsigned char *buffer;
+
+    *data = NULL;
+    *length = 0;
+
+    handle = fopen(filename, "rb");
+    if (handle == NULL)
+        return 1;
+
+    if (fseek(handle, 0, SEEK_END) != 0)
+    {
+        fclose(handle);
+        return 1;
+    }
+
+    file_length = ftell(handle);
+    if (file_length < 0)
+    {
+        fclose(handle);
+        return 1;
+    }
+
+    if (fseek(handle, 0, SEEK_SET) != 0)
+    {
+        fclose(handle);
+        return 1;
+    }
+
+    buffer = malloc((size_t) file_length);
+    if (buffer == NULL)
+    {
+        fclose(handle);
+        return 1;
+    }
+
+    if (fread(buffer, 1, (size_t) file_length, handle) != (size_t) file_length)
+    {
+        free(buffer);
+        fclose(handle);
+        return 1;
+    }
+
+    fclose(handle);
+    *data = buffer;
+    *length = (size_t) file_length;
+    return 0;
+}
+
+/*************************************************** Gerph *********
+ Function:      test_svg_draw_text
+ Description:   Draw a labelled text sample
+ Parameters:    gc-> graphics context
+                font = font to use
+                x = left coordinate
+                y = baseline coordinate
+                text = string to paint
+ Returns:       none
+ ******************************************************************/
+static void test_svg_draw_text(gcontext_t *gc,
+                               font_t font,
+                               int32_t x,
+                               int32_t y,
+                               const char *text)
+{
+    stringbounds_t bounds;
+
+    gc->text_getstringsize(gc, font, &bounds, -1, text, GCONTEXT_ZEROTERM, GCONTEXT_NOSPLIT);
+    gc->rectangle_outline(gc, COLOUR_RGB(64, 64, 128),
+                          x + bounds.lbearing,
+                          y - bounds.descent,
+                          x + bounds.xoffset + bounds.rbearing,
+                          y + bounds.ascent);
+    gc->text_paint(gc, font, x, y, COLOUR_NONE, COLOUR_RGB(0, 0, 0),
+                   text, (int32_t) GCONTEXT_ZEROTERM);
+}
+
+/*************************************************** Gerph *********
+ Function:      test_svg_render_scene
+ Description:   Render a scene through the GContext interface
+ Parameters:    gc-> graphics context
+ Returns:       0 if successful, 1 if failed
+ ******************************************************************/
+static int test_svg_render_scene(gcontext_t *gc)
+{
+    bbox_t clip;
+    font_t font;
+
+    font = gc->text_findfont(gc, TEST_FONT_NAME, TEST_FONT_XSIZE, TEST_FONT_YSIZE);
+    if (font == FONT_NONE)
+    {
+        fprintf(stderr, "Failed to obtain a font handle\n");
+        return 1;
+    }
+
+    gc->rectangle_fill(gc, COLOUR_RGB(224, 224, 255), 64, 64, 1024, 512);
+    gc->rectangle_outline(gc, COLOUR_RGB(0, 0, 200), 64, 64, 1024, 512);
+    gc->triangle_fill(gc, COLOUR_RGB(192, 32, 32), 160, 192, 320, 448, 512, 160);
+
+    gc->line_start(gc, COLOUR_RGB(0, 160, 0));
+    gc->line_line(gc, 96, 576, 992, 576);
+    gc->line_line(gc, 992, 576, 960, 720);
+    gc->line_end(gc);
+
+    gc->line_start(gc, COLOUR_RGB(255, 128, 0));
+    gc->line_dotted(gc, 96, 640, 992, 640);
+    gc->line_end(gc);
+
+    gc->line_start(gc, COLOUR_RGB(0, 160, 160));
+    gc->line_dashed(gc, 96, 672, 992, 672);
+    gc->line_end(gc);
+
+    gc->fill_start(gc, COLOUR_RGB(96, 0, 160));
+    gc->fill_move(gc, 640, 160);
+    gc->fill_line(gc, 896, 160);
+    gc->fill_line(gc, 960, 352);
+    gc->fill_line(gc, 768, 480);
+    gc->fill_line(gc, 608, 320);
+    gc->fill_close(gc);
+    gc->fill_end(gc);
+
+    test_svg_draw_text(gc, font, 96, 832, "SVG backend");
+    gc->text_paintattrib(gc, font, 96, 896, 1024, 992,
+                         "Centred underlined text", (int32_t) GCONTEXT_ZEROTERM,
+                         COLOUR_NONE, COLOUR_RGB(0, 0, 0),
+                         (uint32_t) (FONTATTRIB_ALIGN_HCENTRE | FONTATTRIB_ALIGN_VCENTRE | FONTATTRIB_UNDERLINE));
+
+    /* Partially-overlapping clip: proves real SVG clipPath is used, not culling */
+    clip.x0 = 700;
+    clip.y0 = 700;
+    clip.x1 = 1100;
+    clip.y1 = 1000;
+    gc->clip_rectangle(gc, &clip);
+    gc->rectangle_fill(gc, COLOUR_RGB(255, 0, 255), 600, 600, 1200, 1100);
+    gc->clip_rectangle(gc, NULL);
+
+    gc->text_losefont(gc, font);
+    return 0;
+}
+
+/*************************************************** Gerph *********
+ Function:      main
+ Description:   Build SVGs through both backend entry points
+ Parameters:    argc = argument count
+                argv = argument vector
+ Returns:       EXIT_SUCCESS or EXIT_FAILURE
+ ******************************************************************/
+int main(int argc, char *argv[])
+{
+    gcontext_t *gc;
+    unsigned char *file_buffer;
+    unsigned char *memory_buffer;
+    size_t file_length;
+    int32_t file_size;
+    int32_t memory_size;
+    int32_t data_size;
+    int result;
+
+    file_buffer = NULL;
+    memory_buffer = NULL;
+    file_length = 0;
+    file_size = -1;
+    memory_size = -1;
+    data_size = -1;
+    result = EXIT_FAILURE;
+
+    gc = gcontext_initsvg(TEST_SVG_OUTPUT_FILE);
+    if (gc == NULL)
+    {
+        fprintf(stderr, "Failed to create file-backed SVG context\n");
+        goto finish;
+    }
+    if (test_svg_render_scene(gc) != 0)
+    {
+        gcontext_destroy(gc);
+        goto finish;
+    }
+    file_size = gcontext_svg_finalise(gc);
+    gcontext_destroy(gc);
+    if (file_size < 0)
+    {
+        fprintf(stderr, "Failed to finalise file-backed SVG\n");
+        goto finish;
+    }
+
+    gc = gcontext_initsvgmemory(NULL, 0);
+    if (gc == NULL)
+    {
+        fprintf(stderr, "Failed to create sizing SVG context\n");
+        goto finish;
+    }
+    if (test_svg_render_scene(gc) != 0)
+    {
+        gcontext_destroy(gc);
+        goto finish;
+    }
+    data_size = gcontext_svg_datasize(gc);
+    gcontext_destroy(gc);
+    if (data_size <= 0)
+    {
+        fprintf(stderr, "Failed to size memory-backed SVG\n");
+        goto finish;
+    }
+
+    memory_buffer = malloc((size_t) data_size);
+    if (memory_buffer == NULL)
+    {
+        fprintf(stderr, "Failed to allocate %ld bytes for SVG\n", (long) data_size);
+        goto finish;
+    }
+
+    gc = gcontext_initsvgmemory(memory_buffer, (size_t) data_size);
+    if (gc == NULL)
+    {
+        fprintf(stderr, "Failed to create memory-backed SVG context\n");
+        goto finish;
+    }
+    if (test_svg_render_scene(gc) != 0)
+    {
+        gcontext_destroy(gc);
+        goto finish;
+    }
+    memory_size = gcontext_svg_finalise(gc);
+    gcontext_destroy(gc);
+    if (memory_size != data_size)
+    {
+        fprintf(stderr, "Memory SVG size mismatch (%ld vs %ld)\n",
+                (long) memory_size, (long) data_size);
+        goto finish;
+    }
+
+    if (test_svg_write_file(TEST_SVG_OUTPUT_MEMORY, memory_buffer, (size_t) memory_size) != 0)
+    {
+        fprintf(stderr, "Failed to write memory-backed SVG\n");
+        goto finish;
+    }
+
+    if (test_svg_read_file(TEST_SVG_OUTPUT_FILE, &file_buffer, &file_length) != 0)
+    {
+        fprintf(stderr, "Failed to read file-backed SVG\n");
+        goto finish;
+    }
+
+    if ((int32_t) file_length != file_size)
+    {
+        fprintf(stderr, "Unexpected file-backed SVG size (%ld vs %ld)\n",
+                (long) file_length, (long) file_size);
+        goto finish;
+    }
+
+    if (memcmp(file_buffer, memory_buffer, (size_t) file_size) != 0)
+    {
+        fprintf(stderr, "File-backed and memory-backed SVGs differ\n");
+        goto finish;
+    }
+
+    printf("Generated %s and %s (%ld bytes)\n",
+           TEST_SVG_OUTPUT_FILE,
+           TEST_SVG_OUTPUT_MEMORY,
+           (long) file_size);
+    result = EXIT_SUCCESS;
+
+finish:
+    free(file_buffer);
+    free(memory_buffer);
+    return result;
+}

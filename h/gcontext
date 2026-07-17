@@ -183,6 +183,39 @@ int32_t gcontext_drawfile_finalise(struct gcontext_s *gc);
 int32_t gcontext_drawfile_datasize(struct gcontext_s *gc);
 
 /*************************************************** Gerph *********
+ Function:     gcontext_initsvg
+ Description:  Initialise a graphics context which serialises to an SVG file
+ Parameters:   filename = filename to create on finalisation
+ Returns:      gcontext_t to use for plotting, or NULL if unavailable
+ ******************************************************************/
+struct gcontext_s *gcontext_initsvg(const char *filename);
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initsvgmemory
+ Description:  Initialise a graphics context which serialises SVG to memory
+ Parameters:   memory = destination buffer, or NULL to size only
+               memorysize = size of the destination buffer
+ Returns:      gcontext_t to use for plotting, or NULL if unavailable
+ ******************************************************************/
+struct gcontext_s *gcontext_initsvgmemory(void *memory, size_t memorysize);
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_finalise
+ Description:  Serialise an SVG-backed graphics context
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if failed
+ ******************************************************************/
+int32_t gcontext_svg_finalise(struct gcontext_s *gc);
+
+/*************************************************** Gerph *********
+ Function:     gcontext_svg_datasize
+ Description:  Report the size of the SVG data for a graphics context
+ Parameters:   gc-> graphics context
+ Returns:      size of serialised data, or -1 if unavailable
+ ******************************************************************/
+int32_t gcontext_svg_datasize(struct gcontext_s *gc);
+
+/*************************************************** Gerph *********
  Function:     gcontext_destroy
  Description:  Release a graphics context and any backend state
  Parameters:   gc-> graphics context
