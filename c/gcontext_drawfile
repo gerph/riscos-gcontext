@@ -128,6 +128,10 @@ typedef struct gcontext_drawfile_s
     char *filename;
     void *memory;
     size_t memorysize;
+    int32_t xscale;
+    int32_t yscale;
+    int32_t xtranslation;
+    int32_t ytranslation;
 
     gcontext_drawfile_font_t *fonts;
     gcontext_drawfile_object_t *head;
@@ -145,6 +149,124 @@ typedef struct gcontext_drawfile_s
 } gcontext_drawfile_t;
 
 static void gcontext_drawfile_line_end(gcontext_t *gc);
+
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_scale_coordinate
+ Description:  Scale a coordinate without overflowing the DrawFile range
+ Parameters:   coordinate = source coordinate
+               scale = positive DrawFile units per OS unit
+               result = transformed coordinate
+ Returns:      non-zero if the result is representable
+ ******************************************************************/
+static int gcontext_drawfile_scale_coordinate(int32_t coordinate,
+                                              int32_t scale,
+                                              int32_t *result)
+{
+    if ((coordinate > 0 && coordinate > INT32_MAX / scale) ||
+        (coordinate < 0 && coordinate < INT32_MIN / scale))
+        return 0;
+
+    *result = coordinate * scale;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_transform_coordinate
+ Description:  Scale and translate a coordinate into DrawFile units
+ Parameters:   gc = graphics context
+               coordinate = source coordinate
+               xaxis = non-zero for an x coordinate
+               result = transformed coordinate
+ Returns:      non-zero if the result is representable
+ ******************************************************************/
+static int gcontext_drawfile_transform_coordinate(gcontext_t *gc,
+                                                  int32_t coordinate,
+                                                  int xaxis,
+                                                  int32_t *result)
+{
+    gcontext_drawfile_t *drawfile;
+    int32_t scale;
+    int32_t translation;
+    int32_t scaled;
+
+    drawfile = gc->backend_private;
+    scale = xaxis ? drawfile->xscale : drawfile->yscale;
+    translation = xaxis ? drawfile->xtranslation : drawfile->ytranslation;
+    if (!gcontext_drawfile_scale_coordinate(coordinate, scale, &scaled) ||
+        (translation > 0 && scaled > INT32_MAX - translation) ||
+        (translation < 0 && scaled < INT32_MIN - translation))
+        return 0;
+
+    *result = scaled + translation;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_transform_point
+ Description:  Transform a point into DrawFile units
+ Parameters:   gc = graphics context
+               x,y = source point
+               transformed_x,transformed_y = transformed point
+ Returns:      non-zero if the result is representable
+ ******************************************************************/
+static int gcontext_drawfile_transform_point(gcontext_t *gc,
+                                             int32_t x,
+                                             int32_t y,
+                                             int32_t *transformed_x,
+                                             int32_t *transformed_y)
+{
+    return gcontext_drawfile_transform_coordinate(gc, x, 1, transformed_x) &&
+           gcontext_drawfile_transform_coordinate(gc, y, 0, transformed_y);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_transform_bbox
+ Description:  Transform an axis-aligned bounding box into DrawFile units
+ Parameters:   gc = graphics context
+               bbox = bounding box to transform
+ Returns:      non-zero if the result is representable
+ ******************************************************************/
+static int gcontext_drawfile_transform_bbox(gcontext_t *gc, bbox_t *bbox)
+{
+    int32_t x0;
+    int32_t y0;
+    int32_t x1;
+    int32_t y1;
+
+    if (!gcontext_drawfile_transform_point(gc, bbox->x0, bbox->y0, &x0, &y0) ||
+        !gcontext_drawfile_transform_point(gc, bbox->x1, bbox->y1, &x1, &y1))
+        return 0;
+
+    bbox->x0 = x0;
+    bbox->y0 = y0;
+    bbox->x1 = x1;
+    bbox->y1 = y1;
+    return 1;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_drawfile_fontsize
+ Description:  Convert a Font Manager size to scaled DrawFile units
+ Parameters:   size = font size in points multiplied by 16
+               scale = DrawFile units per GContext OS unit
+               result = DrawFile font size in scaled points
+ Returns:      non-zero if the result is representable
+ ******************************************************************/
+static int gcontext_drawfile_fontsize(int32_t size,
+                                      int32_t scale,
+                                      int32_t *result)
+{
+    int32_t scaled;
+
+    if (size < 0 ||
+        !gcontext_drawfile_scale_coordinate(size, scale, &scaled) ||
+        scaled > INT32_MAX / 5)
+        return 0;
+
+    *result = (scaled * 5) / 32;
+    return 1;
+}
 
 
 /*************************************************** Gerph *********
@@ -571,21 +693,36 @@ static int gcontext_drawfile_path_lastxy(gcontext_drawfile_object_t *object,
                dashcount = number of dash entries
  Returns:      non-zero if successful
  ******************************************************************/
-static int gcontext_drawfile_path_setdash(gcontext_drawfile_object_t *object,
+static int gcontext_drawfile_path_setdash(gcontext_t *gc,
+                                          gcontext_drawfile_object_t *object,
                                           const int32_t *dashes,
                                           int32_t dashcount)
 {
+    gcontext_drawfile_t *drawfile;
     gcontext_drawfile_path_t *path;
+    int32_t *scaled_dashes;
+    int32_t index;
 
+    drawfile = gc->backend_private;
     path = &object->data.path;
     if (dashcount == 0)
         return 1;
 
-    path->dashes = malloc(sizeof(*path->dashes) * dashcount);
-    if (path->dashes == NULL)
+    scaled_dashes = malloc(sizeof(*scaled_dashes) * dashcount);
+    if (scaled_dashes == NULL)
         return 0;
 
-    memcpy(path->dashes, dashes, sizeof(*path->dashes) * dashcount);
+    for (index = 0; index < dashcount; index++)
+    {
+        if (!gcontext_drawfile_scale_coordinate(dashes[index], drawfile->xscale,
+                                                &scaled_dashes[index]))
+        {
+            free(scaled_dashes);
+            return 0;
+        }
+    }
+
+    path->dashes = scaled_dashes;
     path->dashcount = dashcount;
     path->style |= (1 << 7);
     return 1;
@@ -676,6 +813,8 @@ static coords_t gcontext_drawfile_emit_text(gcontext_t *gc,
     stringbounds_t bounds;
     coords_t end;
     size_t textlength;
+    int32_t transformed_x;
+    int32_t transformed_y;
 
     end.x = x;
     end.y = y;
@@ -715,9 +854,15 @@ static coords_t gcontext_drawfile_emit_text(gcontext_t *gc,
     object->data.text.text[strsize] = '\0';
     object->type = gcontext_drawfile_object_text;
     object->bbox = gcontext_drawfile_text_bbox(x, y, &bounds);
+    if (!gcontext_drawfile_transform_bbox(gc, &object->bbox) ||
+        !gcontext_drawfile_transform_point(gc, x, y, &transformed_x, &transformed_y))
+    {
+        gcontext_drawfile_free_object(object);
+        return end;
+    }
     object->data.text.font = font;
-    object->data.text.x = x;
-    object->data.text.y = y;
+    object->data.text.x = transformed_x;
+    object->data.text.y = transformed_y;
     object->data.text.fill = fg;
     gcontext_drawfile_append_object(gc, object);
 
@@ -738,18 +883,26 @@ static void gcontext_drawfile_rectangle_fill(gcontext_t *gc,
                                              int32_t x1, int32_t y1)
 {
     gcontext_drawfile_object_t *object;
+    int32_t transformed_x0;
+    int32_t transformed_y0;
+    int32_t transformed_x1;
+    int32_t transformed_y1;
 
     if (gc->clipstate == cs_suppress)
+        return;
+
+    if (!gcontext_drawfile_transform_point(gc, x0, y0, &transformed_x0, &transformed_y0) ||
+        !gcontext_drawfile_transform_point(gc, x1, y1, &transformed_x1, &transformed_y1))
         return;
 
     object = gcontext_drawfile_new_path(colour, (colour_t) COLOUR_NONE, (int32_t) (1 << 6));
     if (object == NULL)
         return;
 
-    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x0, y0) ||
-        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x0, y1) ||
-        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y1) ||
-        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y0))
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, transformed_x0, transformed_y0) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, transformed_x0, transformed_y1) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, transformed_x1, transformed_y1) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, transformed_x1, transformed_y0))
     {
         gcontext_drawfile_free_object(object);
         return;
@@ -774,17 +927,28 @@ static void gcontext_drawfile_triangle_fill(gcontext_t *gc,
                                             int32_t x2, int32_t y2)
 {
     gcontext_drawfile_object_t *object;
+    int32_t transformed_x0;
+    int32_t transformed_y0;
+    int32_t transformed_x1;
+    int32_t transformed_y1;
+    int32_t transformed_x2;
+    int32_t transformed_y2;
 
     if (gc->clipstate == cs_suppress)
+        return;
+
+    if (!gcontext_drawfile_transform_point(gc, x0, y0, &transformed_x0, &transformed_y0) ||
+        !gcontext_drawfile_transform_point(gc, x1, y1, &transformed_x1, &transformed_y1) ||
+        !gcontext_drawfile_transform_point(gc, x2, y2, &transformed_x2, &transformed_y2))
         return;
 
     object = gcontext_drawfile_new_path(colour, (colour_t) COLOUR_NONE, (int32_t) (1 << 6));
     if (object == NULL)
         return;
 
-    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x0, y0) ||
-        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y1) ||
-        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x2, y2))
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, transformed_x0, transformed_y0) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, transformed_x1, transformed_y1) ||
+        !gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, transformed_x2, transformed_y2))
     {
         gcontext_drawfile_free_object(object);
         return;
@@ -826,7 +990,7 @@ static int gcontext_drawfile_line_create(gcontext_t *gc,
             DRAWFILE_DASH_DOTTED_ON,
             DRAWFILE_DASH_DOTTED_OFF
         };
-        if (!gcontext_drawfile_path_setdash(drawfile->current_line, dotted, 2))
+        if (!gcontext_drawfile_path_setdash(gc, drawfile->current_line, dotted, 2))
         {
             gcontext_drawfile_free_object(drawfile->current_line);
             drawfile->current_line = NULL;
@@ -839,7 +1003,7 @@ static int gcontext_drawfile_line_create(gcontext_t *gc,
             DRAWFILE_DASH_DASHED_ON,
             DRAWFILE_DASH_DASHED_OFF
         };
-        if (!gcontext_drawfile_path_setdash(drawfile->current_line, dashed, 2))
+        if (!gcontext_drawfile_path_setdash(gc, drawfile->current_line, dashed, 2))
         {
             gcontext_drawfile_free_object(drawfile->current_line);
             drawfile->current_line = NULL;
@@ -906,8 +1070,16 @@ static void gcontext_drawfile_line_add(gcontext_t *gc,
     gcontext_drawfile_object_t *object;
     int32_t lastx;
     int32_t lasty;
+    int32_t transformed_x0;
+    int32_t transformed_y0;
+    int32_t transformed_x1;
+    int32_t transformed_y1;
 
     if (gc->clipstate == cs_suppress)
+        return;
+
+    if (!gcontext_drawfile_transform_point(gc, x0, y0, &transformed_x0, &transformed_y0) ||
+        !gcontext_drawfile_transform_point(gc, x1, y1, &transformed_x1, &transformed_y1))
         return;
 
     if (!gcontext_drawfile_line_ensure(gc, linestyle))
@@ -919,10 +1091,11 @@ static void gcontext_drawfile_line_add(gcontext_t *gc,
         return;
 
     if (!gcontext_drawfile_path_lastxy(object, &lastx, &lasty) ||
-        lastx != x0 ||
-        lasty != y0)
+        lastx != transformed_x0 ||
+        lasty != transformed_y0)
     {
-        if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x0, y0))
+        if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE,
+                                             transformed_x0, transformed_y0))
         {
             gcontext_drawfile_free_object(object);
             drawfile->current_line = NULL;
@@ -930,7 +1103,8 @@ static void gcontext_drawfile_line_add(gcontext_t *gc,
         }
     }
 
-    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x1, y1))
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE,
+                                         transformed_x1, transformed_y1))
     {
         gcontext_drawfile_free_object(object);
         drawfile->current_line = NULL;
@@ -1038,8 +1212,13 @@ static void gcontext_drawfile_fill_move(gcontext_t *gc, int32_t x, int32_t y)
 {
     gcontext_drawfile_t *drawfile;
     gcontext_drawfile_object_t *object;
+    int32_t transformed_x;
+    int32_t transformed_y;
 
     if (gc->clipstate == cs_suppress)
+        return;
+
+    if (!gcontext_drawfile_transform_point(gc, x, y, &transformed_x, &transformed_y))
         return;
 
     drawfile = gc->backend_private;
@@ -1047,7 +1226,8 @@ static void gcontext_drawfile_fill_move(gcontext_t *gc, int32_t x, int32_t y)
     if (object == NULL)
         return;
 
-    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE, x, y))
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_MOVE,
+                                         transformed_x, transformed_y))
     {
         gcontext_drawfile_free_object(object);
         drawfile->current_fill = NULL;
@@ -1065,8 +1245,13 @@ static void gcontext_drawfile_fill_line(gcontext_t *gc, int32_t x, int32_t y)
 {
     gcontext_drawfile_t *drawfile;
     gcontext_drawfile_object_t *object;
+    int32_t transformed_x;
+    int32_t transformed_y;
 
     if (gc->clipstate == cs_suppress)
+        return;
+
+    if (!gcontext_drawfile_transform_point(gc, x, y, &transformed_x, &transformed_y))
         return;
 
     drawfile = gc->backend_private;
@@ -1074,7 +1259,8 @@ static void gcontext_drawfile_fill_line(gcontext_t *gc, int32_t x, int32_t y)
     if (object == NULL)
         return;
 
-    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE, x, y))
+    if (!gcontext_drawfile_path_addpoint(object, DRAWFILE_PATH_LINE,
+                                         transformed_x, transformed_y))
     {
         gcontext_drawfile_free_object(object);
         drawfile->current_fill = NULL;
@@ -1139,6 +1325,8 @@ static font_t gcontext_drawfile_findfont(gcontext_t *gc,
     gcontext_drawfile_font_t *font;
     font_t handle;
     char *fontname;
+    int32_t drawfile_xsize;
+    int32_t drawfile_ysize;
 
     drawfile = gc->backend_private;
     handle = fontfallback_findfont(gc, name, xsize, ysize);
@@ -1160,10 +1348,19 @@ static font_t gcontext_drawfile_findfont(gcontext_t *gc,
         return FONT_NONE;
     }
 
+    if (!gcontext_drawfile_fontsize(xsize, drawfile->xscale, &drawfile_xsize) ||
+        !gcontext_drawfile_fontsize(ysize, drawfile->yscale, &drawfile_ysize))
+    {
+        free(fontname);
+        free(font);
+        fontfallback_losefont(gc, handle);
+        return FONT_NONE;
+    }
+
     font->handle = handle;
     font->name = fontname;
-    font->xsize = xsize;
-    font->ysize = ysize;
+    font->xsize = drawfile_xsize;
+    font->ysize = drawfile_ysize;
     font->next = drawfile->fonts;
     drawfile->fonts = font;
     return handle;
@@ -1389,6 +1586,8 @@ static bool gcontext_drawfile_clip_rectangle(gcontext_t *gc, bbox_t *bbox)
     {
         gc->clipstate = cs_clip;
         gc->clipping = *bbox;
+        if (!gcontext_drawfile_transform_bbox(gc, &gc->clipping))
+            gc->clipstate = cs_suppress;
     }
     return false;
 }
@@ -1787,15 +1986,24 @@ static void gcontext_drawfile_backend_destroy(gcontext_t *gc)
                filename = destination filename for file output
                memory = destination memory for memory output
                memorysize = size of destination memory buffer
+               xscale,yscale = positive DrawFile units per OS unit
+               xtranslation,ytranslation = DrawFile coordinate offsets
  Returns:      graphics context or NULL
  ******************************************************************/
 static gcontext_t *gcontext_initdrawfile_common(gcontext_drawfile_target_t target,
                                                 const char *filename,
                                                 void *memory,
-                                                size_t memorysize)
+                                                size_t memorysize,
+                                                int32_t xscale,
+                                                int32_t yscale,
+                                                int32_t xtranslation,
+                                                int32_t ytranslation)
 {
     gcontext_t *gc;
     gcontext_drawfile_t *drawfile;
+
+    if (xscale <= 0 || yscale <= 0)
+        return NULL;
 
     gc = calloc(1, sizeof(*gc));
     if (gc == NULL)
@@ -1822,6 +2030,10 @@ static gcontext_t *gcontext_initdrawfile_common(gcontext_drawfile_target_t targe
     drawfile->target = target;
     drawfile->memory = memory;
     drawfile->memorysize = memorysize;
+    drawfile->xscale = xscale;
+    drawfile->yscale = yscale;
+    drawfile->xtranslation = xtranslation;
+    drawfile->ytranslation = ytranslation;
 
     gc->rectangle_fill = gcontext_drawfile_rectangle_fill;
     gc->rectangle_outline = gcontext_generic_rectoutline;
@@ -1861,13 +2073,38 @@ static gcontext_t *gcontext_initdrawfile_common(gcontext_drawfile_target_t targe
  ******************************************************************/
 gcontext_t *gcontext_initdrawfile(const char *filename)
 {
+    return gcontext_initdrawfile_scaled(filename,
+                                        DRAWFILE_OSUNIT,
+                                        DRAWFILE_OSUNIT,
+                                        0,
+                                        0);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initdrawfile_scaled
+ Description:  Initialise a transformed file-backed DrawFile context
+ Parameters:   filename = destination filename
+               xscale,yscale = positive DrawFile units per OS unit
+               xtranslation,ytranslation = DrawFile coordinate offsets
+ Returns:      graphics context or NULL
+ ******************************************************************/
+gcontext_t *gcontext_initdrawfile_scaled(const char *filename,
+                                         int32_t xscale,
+                                         int32_t yscale,
+                                         int32_t xtranslation,
+                                         int32_t ytranslation)
+{
     if (filename == NULL)
         return NULL;
 
     return gcontext_initdrawfile_common(gcontext_drawfile_target_file,
                                         filename,
                                         NULL,
-                                        0);
+                                        0,
+                                        xscale,
+                                        yscale,
+                                        xtranslation,
+                                        ytranslation);
 }
 
 /*************************************************** Gerph *********
@@ -1879,10 +2116,38 @@ gcontext_t *gcontext_initdrawfile(const char *filename)
  ******************************************************************/
 gcontext_t *gcontext_initdrawfilememory(void *memory, size_t memorysize)
 {
+    return gcontext_initdrawfilememory_scaled(memory,
+                                              memorysize,
+                                              DRAWFILE_OSUNIT,
+                                              DRAWFILE_OSUNIT,
+                                              0,
+                                              0);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initdrawfilememory_scaled
+ Description:  Initialise a transformed memory-backed DrawFile context
+ Parameters:   memory = destination memory, or NULL to size only
+               memorysize = size of destination memory
+               xscale,yscale = positive DrawFile units per OS unit
+               xtranslation,ytranslation = DrawFile coordinate offsets
+ Returns:      graphics context or NULL
+ ******************************************************************/
+gcontext_t *gcontext_initdrawfilememory_scaled(void *memory,
+                                               size_t memorysize,
+                                               int32_t xscale,
+                                               int32_t yscale,
+                                               int32_t xtranslation,
+                                               int32_t ytranslation)
+{
     return gcontext_initdrawfile_common(gcontext_drawfile_target_memory,
                                         NULL,
                                         memory,
-                                        memorysize);
+                                        memorysize,
+                                        xscale,
+                                        yscale,
+                                        xtranslation,
+                                        ytranslation);
 }
 
 /*************************************************** Gerph *********

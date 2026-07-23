@@ -20,6 +20,11 @@
 #define TEST_FONT_XSIZE (12 * 16)
 #define TEST_FONT_YSIZE (12 * 16)
 
+#define TEST_TRANSFORM_XSCALE       3
+#define TEST_TRANSFORM_YSCALE       5
+#define TEST_TRANSFORM_XTRANSLATION 100
+#define TEST_TRANSFORM_YTRANSLATION (-200)
+
 
 /*************************************************** Gerph *********
  Function:      test_drawfile_write_file
@@ -111,6 +116,93 @@ static int test_drawfile_read_file(const char *filename,
     *data = buffer;
     *length = (size_t) file_length;
     return 0;
+}
+
+/*************************************************** Gerph *********
+ Function:      test_drawfile_readword
+ Description:   Read a signed little-endian word from a DrawFile buffer
+ Parameters:    data = DrawFile data
+                word = word index to read
+ Returns:       word value
+ ******************************************************************/
+static int32_t test_drawfile_readword(const unsigned char *data, size_t word)
+{
+    uint32_t value;
+
+    value = (uint32_t) data[word * 4] |
+            ((uint32_t) data[word * 4 + 1] << 8) |
+            ((uint32_t) data[word * 4 + 2] << 16) |
+            ((uint32_t) data[word * 4 + 3] << 24);
+    return (int32_t) value;
+}
+
+/*************************************************** Gerph *********
+ Function:      test_drawfile_transform
+ Description:   Check scaled DrawFile coordinates and bounding boxes
+ Parameters:    none
+ Returns:       0 if successful, 1 if failed
+ ******************************************************************/
+static int test_drawfile_transform(void)
+{
+    gcontext_t *gc;
+    unsigned char *buffer;
+    int32_t size;
+    int result;
+
+    buffer = NULL;
+    result = 1;
+
+    gc = gcontext_initdrawfilememory_scaled(NULL, 0,
+                                             TEST_TRANSFORM_XSCALE,
+                                             TEST_TRANSFORM_YSCALE,
+                                             TEST_TRANSFORM_XTRANSLATION,
+                                             TEST_TRANSFORM_YTRANSLATION);
+    if (gc == NULL)
+        goto finish;
+
+    gc->rectangle_fill(gc, COLOUR_RGB(0, 0, 0), 1, 2, 4, 6);
+    size = gcontext_drawfile_datasize(gc);
+    gcontext_destroy(gc);
+    if (size < 23 * 4)
+        goto finish;
+
+    buffer = malloc((size_t) size);
+    if (buffer == NULL)
+        goto finish;
+
+    gc = gcontext_initdrawfilememory_scaled(buffer, (size_t) size,
+                                             TEST_TRANSFORM_XSCALE,
+                                             TEST_TRANSFORM_YSCALE,
+                                             TEST_TRANSFORM_XTRANSLATION,
+                                             TEST_TRANSFORM_YTRANSLATION);
+    if (gc == NULL)
+        goto finish;
+
+    gc->rectangle_fill(gc, COLOUR_RGB(0, 0, 0), 1, 2, 4, 6);
+    if (gcontext_drawfile_finalise(gc) != size)
+    {
+        gcontext_destroy(gc);
+        goto finish;
+    }
+    gcontext_destroy(gc);
+
+    if (test_drawfile_readword(buffer, 6) != 103 ||
+        test_drawfile_readword(buffer, 7) != -190 ||
+        test_drawfile_readword(buffer, 8) != 112 ||
+        test_drawfile_readword(buffer, 9) != -170 ||
+        test_drawfile_readword(buffer, 12) != 103 ||
+        test_drawfile_readword(buffer, 13) != -190 ||
+        test_drawfile_readword(buffer, 14) != 112 ||
+        test_drawfile_readword(buffer, 15) != -170 ||
+        test_drawfile_readword(buffer, 21) != 103 ||
+        test_drawfile_readword(buffer, 22) != -190)
+        goto finish;
+
+    result = 0;
+
+finish:
+    free(buffer);
+    return result;
 }
 
 /*************************************************** Gerph *********
@@ -228,6 +320,12 @@ int main(int argc, char *argv[])
     memory_size = -1;
     data_size = -1;
     result = EXIT_FAILURE;
+
+    if (test_drawfile_transform() != 0)
+    {
+        fprintf(stderr, "DrawFile coordinate transformation test failed\n");
+        goto finish;
+    }
 
     gc = gcontext_initdrawfile(TEST_DRAWFILE_OUTPUT_FILE);
     if (gc == NULL)

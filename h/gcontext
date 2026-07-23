@@ -62,6 +62,9 @@ typedef struct font_s *font_t;
 /* Length is the string length terminated by 0 */
 #define GCONTEXT_ZEROTERM (-1)
 
+/* Number of DrawFile coordinate units in one RISC OS OS unit. */
+#define DRAWFILE_OSUNIT   256
+
 /* Backend-specific public entry points are declared in this header. */
 
 typedef struct gcontext_s {
@@ -152,19 +155,51 @@ struct gcontext_s *gcontext_initvdu(int fonts);
 /*************************************************** Gerph *********
  Function:     gcontext_initdrawfile
  Description:  Initialise a graphics context which serialises to a DrawFile
- Parameters:   filename = filename to create on finalisation
+ Parameters:   filename = filename to create on finalisation; coordinates use
+               DRAWFILE_OSUNIT DrawFile units per GContext OS unit
  Returns:      gcontext_t to use for plotting, or NULL if unavailable
  ******************************************************************/
 struct gcontext_s *gcontext_initdrawfile(const char *filename);
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initdrawfile_scaled
+ Description:  Initialise a transformed DrawFile graphics context
+ Parameters:   filename = filename to create on finalisation
+               xscale,yscale = DrawFile units per GContext OS unit
+               xtranslation,ytranslation = DrawFile coordinate offsets
+ Returns:      gcontext_t to use for plotting, or NULL if unavailable
+ ******************************************************************/
+struct gcontext_s *gcontext_initdrawfile_scaled(const char *filename,
+                                                int32_t xscale,
+                                                int32_t yscale,
+                                                int32_t xtranslation,
+                                                int32_t ytranslation);
 
 /*************************************************** Gerph *********
  Function:     gcontext_initdrawfilememory
  Description:  Initialise a graphics context which serialises to memory
  Parameters:   memory = destination buffer, or NULL to size only
                memorysize = size of the destination buffer
+               coordinates use DRAWFILE_OSUNIT DrawFile units per GContext OS unit
  Returns:      gcontext_t to use for plotting, or NULL if unavailable
  ******************************************************************/
 struct gcontext_s *gcontext_initdrawfilememory(void *memory, size_t memorysize);
+
+/*************************************************** Gerph *********
+ Function:     gcontext_initdrawfilememory_scaled
+ Description:  Initialise a transformed memory-backed DrawFile context
+ Parameters:   memory = destination buffer, or NULL to size only
+               memorysize = size of the destination buffer
+               xscale,yscale = DrawFile units per GContext OS unit
+               xtranslation,ytranslation = DrawFile coordinate offsets
+ Returns:      gcontext_t to use for plotting, or NULL if unavailable
+ ******************************************************************/
+struct gcontext_s *gcontext_initdrawfilememory_scaled(void *memory,
+                                                      size_t memorysize,
+                                                      int32_t xscale,
+                                                      int32_t yscale,
+                                                      int32_t xtranslation,
+                                                      int32_t ytranslation);
 
 /*************************************************** Gerph *********
  Function:     gcontext_drawfile_finalise
