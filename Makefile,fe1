@@ -37,6 +37,7 @@ OBJS       = o.border \
              o.screen \
              o.vdu5 \
              o.vdushape \
+             o.vduimage \
 
 include LibExport
 

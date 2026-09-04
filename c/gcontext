@@ -14,6 +14,7 @@
 #include "font.h"
 #include "vdu5.h"
 #include "vdushape.h"
+#include "vduimage.h"
 #include "clipping.h"
 
 /* Define this to debug printed output */
@@ -111,6 +112,10 @@ gcontext_t *gcontext_initvdu(int fonts)
     gc->fill_end = gcontext_vdu_fill_end;
 #endif
     gc->clip_rectangle = gcontext_vdu_clipping;
+
+    gc->image_plot_file = gcontext_vdu_image_plot_file;
+    gc->image_plot_data = gcontext_vdu_image_plot_data;
+    gc->tile_fill = gcontext_vdu_tile_fill;
 
     return gc;
 }

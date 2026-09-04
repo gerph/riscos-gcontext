@@ -1,0 +1,56 @@
+/*******************************************************************
+ * File:     vduimage
+ * Purpose:  Image plotting via the ImageFileRender module, and
+ *           sprite tiling via OS_SpriteOp, for the VDU backend
+ * Author:   Gerph
+ * Date:     04 Sep 2026
+ ******************************************************************/
+
+#ifndef VDUIMAGE_H
+#define VDUIMAGE_H
+
+#include "gcontext.h"
+
+/*************************************************** Gerph *********
+ Function:     gcontext_vdu_image_plot_file
+ Description:  Plot an image file into a box, via ImageFileRender
+ Parameters:   gc-> graphics context
+               filetype = RISC OS filetype filename is
+               filename = image file to render
+               x0,y0,x1,y1 = box to plot into
+ Returns:      true if plotted, false if the renderer declined or
+               failed (eg no renderer registered for this filetype)
+ ******************************************************************/
+bool gcontext_vdu_image_plot_file(gcontext_t *gc, gcontext_filetype_t filetype,
+                                  const char *filename,
+                                  int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+
+/*************************************************** Gerph *********
+ Function:     gcontext_vdu_image_plot_data
+ Description:  Plot an in-memory image into a box, via ImageFileRender
+ Parameters:   gc-> graphics context
+               filetype = RISC OS filetype data is
+               data, length = image data
+               x0,y0,x1,y1 = box to plot into
+ Returns:      true if plotted, false if the renderer declined or
+               failed
+ ******************************************************************/
+bool gcontext_vdu_image_plot_data(gcontext_t *gc, gcontext_filetype_t filetype,
+                                  const void *data, size_t length,
+                                  int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+
+/*************************************************** Gerph *********
+ Function:     gcontext_vdu_tile_fill
+ Description:  Tile a sprite to fill a box, via repeated OS_SpriteOp
+               plots (ImageFileRender has no tiling operation, so
+               this only supports GCONTEXT_FILETYPE_SPRITE)
+ Parameters:   gc-> graphics context
+               filetype = must be GCONTEXT_FILETYPE_SPRITE
+               name = sprite name; looked up in the Wimp sprite pool
+ Returns:      true if tiled, false if filetype isn't a sprite, or
+               the sprite couldn't be found/plotted
+ ******************************************************************/
+bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype, const char *name,
+                            int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+
+#endif

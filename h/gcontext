@@ -53,6 +53,18 @@ typedef struct stringbounds_s {
 
 typedef struct font_s *font_t;
 
+/* A standard 12-bit RISC OS filetype (eg 0xFF9 for Sprite, 0xAFF for
+   Draw, 0xC85 for JPEG), identifying what image_plot_file/
+   image_plot_data/tile_fill are being asked to render. Any filetype
+   may be passed - it's for the backend/renderer to accept or reject,
+   not for this header to restrict to a fixed list, since ImageFileRender
+   renderers can be registered for any filetype. */
+typedef uint32_t gcontext_filetype_t;
+
+/* Standard RISC OS filetype for a sprite file, the only filetype
+   tile_fill supports (OS_SpriteOp has no equivalent for Draw/JPEG). */
+#define GCONTEXT_FILETYPE_SPRITE ((gcontext_filetype_t)0xFF9)
+
 /* When no font can be returned */
 #define FONT_NONE ((font_t)(NULL))
 
@@ -127,6 +139,31 @@ typedef struct gcontext_s {
 
     bool (*clip_rectangle)(struct gcontext_s *gc,
                            bbox_t *bbox);
+
+    /* Image plotting: Note: Will be NULL if not supported by this
+       backend (only the VDU backend currently implements these).
+       filetype is a standard RISC OS filetype (GCONTEXT_FILETYPE_SPRITE
+       etc) - any filetype may be passed, and it's for the backend or
+       the renderer it delegates to (eg ImageFileRender) to accept or
+       reject, not for this header to restrict. x0,y0,x1,y1 give the
+       box the image is plotted into. */
+    bool (*image_plot_file)(struct gcontext_s *gc,
+                            gcontext_filetype_t filetype, const char *filename,
+                            int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+    bool (*image_plot_data)(struct gcontext_s *gc,
+                            gcontext_filetype_t filetype, const void *data, size_t length,
+                            int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+
+    /* Tile a sprite to fill a rectangle. Note: Will be NULL if not
+       supported by this backend, and returns false for any filetype
+       other than GCONTEXT_FILETYPE_SPRITE - Draw/JPEG/etc have no
+       tiling equivalent (OS_SpriteOp only handles sprites). name
+       identifies the sprite, exactly as for image_plot_file's
+       filename (a bare name for the Wimp sprite pool, or a
+       caller-defined convention for a named source file). */
+    bool (*tile_fill)(struct gcontext_s *gc,
+                      gcontext_filetype_t filetype, const char *name,
+                      int32_t x0, int32_t y0, int32_t x1, int32_t y1);
 
     void (*backend_destroy)(struct gcontext_s *gc);
     int32_t (*backend_finalise)(struct gcontext_s *gc);

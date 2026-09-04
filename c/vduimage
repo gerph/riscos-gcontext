@@ -1,0 +1,206 @@
+/*******************************************************************
+ * File:     vduimage
+ * Purpose:  Image plotting via the ImageFileRender module, and
+ *           sprite tiling via OS_SpriteOp, for the VDU backend
+ * Author:   Gerph
+ * Date:     04 Sep 2026
+ ******************************************************************/
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include "swis.h"
+
+#include "gcontext.h"
+#include "vdu.h"
+#include "screen.h"
+#include "vduimage.h"
+
+/* ImageFileRender isn't in the standard swis.h, so its SWI number is
+   defined locally - see
+   https://gerph.github.io/riscos-prminxml-staging/prm-ro2/html/select/graphics/imagefilerender.html
+   for the register interface this file implements against. */
+#define ImageFileRender_Render 0x562c0
+
+/* ImageFileRender_Render's R0 rendering-flags bits used here: a plain
+   "size" transform (bits 0-2 = 0, stretch to the given width/height)
+   plus bit 5 requesting OS-unit coordinates throughout, matching
+   this GContext's own coordinate system so no Draw-unit (1/256 OS
+   unit) conversion is needed. */
+#define IFR_TRANSFORMTYPE_SIZE   (0)
+#define IFR_FLAG_RETURN_OSUNITS  (1 << 5)
+
+/* R8's block for a "size" transform: stretch the image to exactly
+   this width/height, in OS units per IFR_FLAG_RETURN_OSUNITS above. */
+typedef struct {
+    int32_t width;
+    int32_t height;
+    int32_t border;
+    int32_t angle;
+} ifr_fitblock_t;
+
+/*************************************************** Gerph *********
+ Function:     image_plot
+ Description:  Renders in-memory image data into a box, via
+               ImageFileRender_Render
+ Parameters:   filetype = RISC OS filetype data is
+               data, length = image data
+               x0,y0,x1,y1 = box to plot into
+ Returns:      true if plotted, false if declined or failed
+ ******************************************************************/
+static bool image_plot(gcontext_filetype_t filetype, const void *data, size_t length,
+                       int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    ifr_fitblock_t fit;
+    _kernel_oserror *err;
+    fit.width = x1 - x0;
+    fit.height = y1 - y0;
+    fit.border = 0;
+    fit.angle = 0;
+    err = _swix(ImageFileRender_Render, _INR(0, 8),
+               IFR_TRANSFORMTYPE_SIZE | IFR_FLAG_RETURN_OSUNITS,
+               filetype, data, length, 0, 0, x0, y0, &fit);
+    return err == NULL;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_vdu_image_plot_data
+ Description:  Plot an in-memory image into a box, via ImageFileRender
+ Parameters:   gc-> graphics context, unused
+               filetype = RISC OS filetype data is
+               data, length = image data
+               x0,y0,x1,y1 = box to plot into
+ Returns:      true if plotted, false if declined or failed
+ ******************************************************************/
+bool gcontext_vdu_image_plot_data(gcontext_t *gc, gcontext_filetype_t filetype,
+                                  const void *data, size_t length,
+                                  int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    (void) gc;
+    if (data == NULL || length == 0)
+        return false;
+    return image_plot(filetype, data, length, x0, y0, x1, y1);
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_vdu_image_plot_file
+ Description:  Plot an image file into a box, via ImageFileRender.
+               ImageFileRender_Render only takes in-memory data, so
+               the whole file is read into memory first.
+ Parameters:   gc-> graphics context, unused
+               filetype = RISC OS filetype filename is
+               filename = image file to render
+               x0,y0,x1,y1 = box to plot into
+ Returns:      true if plotted, false if the file couldn't be read,
+               or the renderer declined or failed
+ ******************************************************************/
+bool gcontext_vdu_image_plot_file(gcontext_t *gc, gcontext_filetype_t filetype,
+                                  const char *filename,
+                                  int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    FILE *fh;
+    long size;
+    void *buffer;
+    bool ok;
+    (void) gc;
+    if (filename == NULL)
+        return false;
+    fh = fopen(filename, "rb");
+    if (fh == NULL)
+        return false;
+    if (fseek(fh, 0, SEEK_END) != 0 || (size = ftell(fh)) < 0 || fseek(fh, 0, SEEK_SET) != 0)
+    {
+        fclose(fh);
+        return false;
+    }
+    buffer = malloc((size_t) size);
+    if (buffer == NULL && size != 0)
+    {
+        fclose(fh);
+        return false;
+    }
+    if (size > 0 && fread(buffer, 1, (size_t) size, fh) != (size_t) size)
+    {
+        fclose(fh);
+        free(buffer);
+        return false;
+    }
+    fclose(fh);
+    ok = image_plot(filetype, buffer, (size_t) size, x0, y0, x1, y1);
+    free(buffer);
+    return ok;
+}
+
+/*************************************************** Gerph *********
+ Function:     gcontext_vdu_tile_fill
+ Description:  Tile a sprite to fill a box. ImageFileRender has no
+               tiling operation, so this repeatedly plots the sprite
+               (OS_SpriteOp 34, system sprite area, by name) across
+               the box, narrowing the graphics window to the box
+               first so the edge tiles are clipped correctly.
+ Parameters:   gc-> graphics context, unused
+               filetype = must be GCONTEXT_FILETYPE_SPRITE
+               name = sprite name; looked up in the Wimp/system
+                      sprite pool
+               x0,y0,x1,y1 = box to fill
+ Returns:      true if tiled, false if filetype isn't a sprite, or
+               the sprite couldn't be found/plotted
+ ******************************************************************/
+bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype, const char *name,
+                            int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    _kernel_oserror *err;
+    int32_t pixel_width;
+    int32_t pixel_height;
+    int32_t mask;
+    int32_t mode;
+    int32_t xeig;
+    int32_t yeig;
+    int32_t step_x;
+    int32_t step_y;
+    int32_t x;
+    int32_t y;
+    bbox_t saved_window;
+    bbox_t tile_window;
+    bool ok;
+    (void) gc;
+    if (filetype != GCONTEXT_FILETYPE_SPRITE || name == NULL)
+        return false;
+    /* Sprite size comes back in pixels; convert to OS units using the
+       sprite's own mode's eig factors, since a sprite's OS-unit size
+       depends on the resolution it was defined in, not the current
+       screen mode. */
+    err = _swix(OS_SpriteOp, _INR(0, 2) | _OUTR(3, 6), 40, 0, name,
+               &pixel_width, &pixel_height, &mask, &mode);
+    if (err != NULL)
+        return false;
+    err = _swix(OS_ReadModeVariable, _INR(0, 1) | _OUT(2), mode, ModeVariable_XEigFactor, &xeig);
+    if (err != NULL)
+        return false;
+    err = _swix(OS_ReadModeVariable, _INR(0, 1) | _OUT(2), mode, ModeVariable_YEigFactor, &yeig);
+    if (err != NULL)
+        return false;
+    step_x = pixel_width << xeig;
+    step_y = pixel_height << yeig;
+    if (step_x <= 0 || step_y <= 0)
+        return false;
+    if (screen_get_graphics_window(&saved_window) != 0)
+        return false;
+    tile_window.x0 = x0;
+    tile_window.y0 = y0;
+    tile_window.x1 = x1;
+    tile_window.y1 = y1;
+    if (screen_set_graphics_window(&tile_window) != 0)
+        return false;
+    ok = true;
+    for (y = y0; y < y1 && ok; y += step_y)
+    {
+        for (x = x0; x < x1 && ok; x += step_x)
+        {
+            err = _swix(OS_SpriteOp, _INR(0, 5), 34, 0, name, x, y, 0);
+            ok = (err == NULL);
+        }
+    }
+    screen_set_graphics_window(&saved_window);
+    return ok;
+}
