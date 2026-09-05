@@ -1,0 +1,142 @@
+/*******************************************************************
+ * File:        test_image
+ * Purpose:     Exercise the VDU-backed image_plot_file/tile_fill APIs
+ *              against a real RISC OS environment
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "swis.h"
+
+#include "gcontext.h"
+
+/* A minimal valid 1x1 red PNG, a filetype ImageFileRenderPyromaniac
+   is known to handle, to prove the image_plot_file call sequence
+   itself works when a renderer is registered. */
+static const unsigned char png_1x1_red[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00,
+    0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+    0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xdd, 0x8d, 0xb0, 0x00, 0x00, 0x00,
+    0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+};
+#define FILETYPE_PNG    0xB60
+#define FILETYPE_SPRITE 0xFF9
+
+#define ImageFileRender_Render 0x562c0
+
+typedef struct {
+    int32_t width;
+    int32_t height;
+    int32_t border;
+    int32_t angle;
+} ifr_fitblock_t;
+
+/*************************************************** Gerph *********
+ Function:      diagnose_render
+ Description:   Calls ImageFileRender_Render directly (bypassing
+                gcontext_vdu_image_plot_data) so the real OS error, if
+                any, can be printed for diagnosis
+ ******************************************************************/
+static void diagnose_render(int32_t filetype, const void *data, size_t length)
+{
+    ifr_fitblock_t fit;
+    _kernel_oserror *err;
+    fit.width = 100;
+    fit.height = 100;
+    fit.border = 0;
+    fit.angle = 0;
+    err = _swix(ImageFileRender_Render, _INR(0, 8),
+               (0) | (1 << 5), filetype, data, length, 0, 0, 0, 0, &fit);
+    if (err != NULL)
+        printf("  diagnose_render(filetype &%x): error %d: %s\n", (unsigned) filetype,
+              err->errnum, err->errmess);
+    else
+        printf("  diagnose_render(filetype &%x): OK\n", (unsigned) filetype);
+}
+
+/*************************************************** Gerph *********
+ Function:      load_sprites
+ Description:   Loads a real Wimp spritefile into the system sprite
+                area, so tile_fill has a real sprite to plot. Expects
+                to be run against a copy of a real sprite file named
+                "TestSprites" placed alongside this program (not
+                included in this repo) containing a sprite called
+                "tick" - without one, this always fails, which is
+                itself a useful, expected diagnostic result in an
+                environment with no system sprite area configured.
+ Parameters:    filename = spritefile to load
+ Returns:       0 if successful, 1 if failed
+ ******************************************************************/
+static int load_sprites(const char *filename)
+{
+    _kernel_oserror *err;
+    err = _swix(OS_SpriteOp, _INR(0, 2), 9, 0, 0);       /* Initialise system sprite area (no-op if already init) */
+    err = _swix(OS_SpriteOp, _INR(0, 2), 10, 0, filename);
+    if (err != NULL)
+    {
+        printf("load_sprites: FAILED: %s\n", err->errmess);
+        return 1;
+    }
+    printf("load_sprites: OK\n");
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    gcontext_t *gc;
+    bool ok;
+    (void) argc;
+    (void) argv;
+
+    gc = gcontext_initvdu(1);
+    if (gc == NULL)
+    {
+        printf("gcontext_initvdu failed\n");
+        return 1;
+    }
+    printf("gcontext_initvdu: OK (image_plot_file=%p, image_plot_data=%p, tile_fill=%p)\n",
+          (void *) gc->image_plot_file, (void *) gc->image_plot_data, (void *) gc->tile_fill);
+
+    if (gc->image_plot_data != NULL)
+    {
+        ok = gc->image_plot_data(gc, FILETYPE_PNG, png_1x1_red, sizeof(png_1x1_red),
+                                 100, 100, 200, 200);
+        printf("image_plot_data(PNG, known-good filetype): %s\n", ok ? "OK" : "FAILED");
+        diagnose_render(FILETYPE_PNG, png_1x1_red, sizeof(png_1x1_red));
+    }
+
+    if (gc->image_plot_data != NULL)
+    {
+        ok = gc->image_plot_data(gc, FILETYPE_SPRITE, png_1x1_red, sizeof(png_1x1_red),
+                                 100, 300, 200, 400);
+        printf("image_plot_data(bogus data, filetype Sprite): %s (expected FAILED - no IFR "
+              "renderer registered for Sprite in this test environment)\n", ok ? "OK" : "FAILED");
+    }
+
+    if (gc->tile_fill != NULL)
+    {
+        _kernel_oserror *err;
+        ok = gc->tile_fill(gc, FILETYPE_SPRITE, "tick", 100, 500, 300, 700);
+        printf("tile_fill(tick, no system area loaded - expect a sprite/area\n"
+              "  error, NOT an unknown-reason-code error): %s\n", ok ? "OK" : "FAILED");
+        err = _swix(OS_SpriteOp, _INR(0, 7), 65, 0, "tick", 100, 500, 0, 0, 0);
+        if (err != NULL)
+            printf("  direct OS_SpriteOp 65 error: %d: %s\n", err->errnum, err->errmess);
+        else
+            printf("  direct OS_SpriteOp 65: OK\n");
+    }
+    if (load_sprites("TestSprites") == 0 && gc->tile_fill != NULL)
+    {
+        ok = gc->tile_fill(gc, FILETYPE_SPRITE, "tick", 100, 500, 300, 700);
+        printf("tile_fill(tick, real sprite from system area): %s\n", ok ? "OK" : "FAILED");
+    }
+
+    gcontext_destroy(gc);
+    printf("Done\n");
+    return 0;
+}

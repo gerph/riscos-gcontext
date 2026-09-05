@@ -12,7 +12,6 @@
 #include "swis.h"
 
 #include "gcontext.h"
-#include "vdu.h"
 #include "screen.h"
 #include "vduimage.h"
 
@@ -133,11 +132,13 @@ bool gcontext_vdu_image_plot_file(gcontext_t *gc, gcontext_filetype_t filetype,
 
 /*************************************************** Gerph *********
  Function:     gcontext_vdu_tile_fill
- Description:  Tile a sprite to fill a box. ImageFileRender has no
-               tiling operation, so this repeatedly plots the sprite
-               (OS_SpriteOp 34, system sprite area, by name) across
-               the box, narrowing the graphics window to the box
-               first so the edge tiles are clipped correctly.
+ Description:  Tile a sprite to fill a box, via OS_SpriteOp 65 (Tile
+               Sprite Scaled, SpriteExtend 1.73+) - a genuine native
+               tiling primitive, not something built out of repeated
+               single plots. The graphics window is narrowed to the
+               box first, since OS_SpriteOp 65 tiles across whatever
+               the current graphics window is, with the origin free
+               to fall inside or outside it.
  Parameters:   gc-> graphics context, unused
                filetype = must be GCONTEXT_FILETYPE_SPRITE
                name = sprite name; looked up in the Wimp/system
@@ -150,39 +151,11 @@ bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype, const 
                             int32_t x0, int32_t y0, int32_t x1, int32_t y1)
 {
     _kernel_oserror *err;
-    int32_t pixel_width;
-    int32_t pixel_height;
-    int32_t mask;
-    int32_t mode;
-    int32_t xeig;
-    int32_t yeig;
-    int32_t step_x;
-    int32_t step_y;
-    int32_t x;
-    int32_t y;
     bbox_t saved_window;
     bbox_t tile_window;
     bool ok;
     (void) gc;
     if (filetype != GCONTEXT_FILETYPE_SPRITE || name == NULL)
-        return false;
-    /* Sprite size comes back in pixels; convert to OS units using the
-       sprite's own mode's eig factors, since a sprite's OS-unit size
-       depends on the resolution it was defined in, not the current
-       screen mode. */
-    err = _swix(OS_SpriteOp, _INR(0, 2) | _OUTR(3, 6), 40, 0, name,
-               &pixel_width, &pixel_height, &mask, &mode);
-    if (err != NULL)
-        return false;
-    err = _swix(OS_ReadModeVariable, _INR(0, 1) | _OUT(2), mode, ModeVariable_XEigFactor, &xeig);
-    if (err != NULL)
-        return false;
-    err = _swix(OS_ReadModeVariable, _INR(0, 1) | _OUT(2), mode, ModeVariable_YEigFactor, &yeig);
-    if (err != NULL)
-        return false;
-    step_x = pixel_width << xeig;
-    step_y = pixel_height << yeig;
-    if (step_x <= 0 || step_y <= 0)
         return false;
     if (screen_get_graphics_window(&saved_window) != 0)
         return false;
@@ -192,15 +165,11 @@ bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype, const 
     tile_window.y1 = y1;
     if (screen_set_graphics_window(&tile_window) != 0)
         return false;
-    ok = true;
-    for (y = y0; y < y1 && ok; y += step_y)
-    {
-        for (x = x0; x < x1 && ok; x += step_x)
-        {
-            err = _swix(OS_SpriteOp, _INR(0, 5), 34, 0, name, x, y, 0);
-            ok = (err == NULL);
-        }
-    }
+    /* R0=65 (system area, name lookup), R1 unused, R2=name, R3,R4=origin,
+       R5=plot action (0=overwrite), R6=scale factors (0=1:1), R7=pixel
+       translation table (0=none). */
+    err = _swix(OS_SpriteOp, _INR(0, 7), 65, 0, name, x0, y0, 0, 0, 0);
+    ok = (err == NULL);
     screen_set_graphics_window(&saved_window);
     return ok;
 }
