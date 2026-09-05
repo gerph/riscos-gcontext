@@ -41,16 +41,22 @@ bool gcontext_vdu_image_plot_data(gcontext_t *gc, gcontext_filetype_t filetype,
 
 /*************************************************** Gerph *********
  Function:     gcontext_vdu_tile_fill
- Description:  Tile a sprite to fill a box, via repeated OS_SpriteOp
-               plots (ImageFileRender has no tiling operation, so
-               this only supports GCONTEXT_FILETYPE_SPRITE)
+ Description:  Tile a sprite to fill a box, via OS_SpriteOp 65 (Tile
+               Sprite Scaled, SpriteExtend 1.73+; only supports
+               GCONTEXT_FILETYPE_SPRITE - ImageFileRender has no
+               tiling operation)
  Parameters:   gc-> graphics context
                filetype = must be GCONTEXT_FILETYPE_SPRITE
-               name = sprite name; looked up in the Wimp sprite pool
+               area = caller-owned sprite area, or GCONTEXT_NO_SPRITE_AREA
+               name_or_sprite_pointer = sprite name within area, or
+                                        (if area is
+                                        GCONTEXT_NO_SPRITE_AREA) a
+                                        direct sprite pointer
  Returns:      true if tiled, false if filetype isn't a sprite, or
                the sprite couldn't be found/plotted
  ******************************************************************/
-bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype, const char *name,
+bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype,
+                            void *area, const void *name_or_sprite_pointer,
                             int32_t x0, int32_t y0, int32_t x1, int32_t y1);
 
 #endif

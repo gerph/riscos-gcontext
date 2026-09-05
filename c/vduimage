@@ -138,24 +138,32 @@ bool gcontext_vdu_image_plot_file(gcontext_t *gc, gcontext_filetype_t filetype,
                single plots. The graphics window is narrowed to the
                box first, since OS_SpriteOp 65 tiles across whatever
                the current graphics window is, with the origin free
-               to fall inside or outside it.
+               to fall inside or outside it. Never addresses the
+               system sprite area (applications must not use it) -
+               area is either a caller-owned sprite area (name
+               lookup within it) or GCONTEXT_NO_SPRITE_AREA (a direct
+               sprite pointer, needing no area to locate it).
  Parameters:   gc-> graphics context, unused
                filetype = must be GCONTEXT_FILETYPE_SPRITE
-               name = sprite name; looked up in the Wimp/system
-                      sprite pool
+               area = caller-owned sprite area, or GCONTEXT_NO_SPRITE_AREA
+               name_or_sprite_pointer = sprite name within area, or a
+                                        direct sprite pointer if area
+                                        is GCONTEXT_NO_SPRITE_AREA
                x0,y0,x1,y1 = box to fill
  Returns:      true if tiled, false if filetype isn't a sprite, or
                the sprite couldn't be found/plotted
  ******************************************************************/
-bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype, const char *name,
+bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype,
+                            void *area, const void *name_or_sprite_pointer,
                             int32_t x0, int32_t y0, int32_t x1, int32_t y1)
 {
     _kernel_oserror *err;
     bbox_t saved_window;
     bbox_t tile_window;
+    int32_t reason;
     bool ok;
     (void) gc;
-    if (filetype != GCONTEXT_FILETYPE_SPRITE || name == NULL)
+    if (filetype != GCONTEXT_FILETYPE_SPRITE || name_or_sprite_pointer == NULL)
         return false;
     if (screen_get_graphics_window(&saved_window) != 0)
         return false;
@@ -165,10 +173,12 @@ bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype, const 
     tile_window.y1 = y1;
     if (screen_set_graphics_window(&tile_window) != 0)
         return false;
-    /* R0=65 (system area, name lookup), R1 unused, R2=name, R3,R4=origin,
-       R5=plot action (0=overwrite), R6=scale factors (0=1:1), R7=pixel
-       translation table (0=none). */
-    err = _swix(OS_SpriteOp, _INR(0, 7), 65, 0, name, x0, y0, 0, 0, 0);
+    /* area given: +256, R1=area, R2=name. No area: +512, R1 unused (a
+       sprite pointer is self-locating), R2=sprite pointer. Either way,
+       R3,R4=origin, R5=plot action (0=overwrite), R6=scale factors
+       (0=1:1), R7=pixel translation table (0=none). */
+    reason = area != GCONTEXT_NO_SPRITE_AREA ? 65 + 256 : 65 + 512;
+    err = _swix(OS_SpriteOp, _INR(0, 7), reason, area, name_or_sprite_pointer, x0, y0, 0, 0, 0);
     ok = (err == NULL);
     screen_set_graphics_window(&saved_window);
     return ok;

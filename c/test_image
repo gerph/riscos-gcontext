@@ -60,10 +60,7 @@ static void diagnose_render(int32_t filetype, const void *data, size_t length)
 }
 
 /* Set by load_sprites() to the private user sprite area it builds, so
-   main() can address sprites in it directly (+256) - gc->tile_fill()
-   itself cannot: its interface only supports name lookup in the
-   system/Wimp sprite pool (+0), which is a real, separate API gap,
-   not something this test can paper over. */
+   main() can pass it to gc->tile_fill() directly. */
 static void *test_sprite_area;
 
 /*************************************************** Gerph *********
@@ -145,35 +142,29 @@ int main(int argc, char *argv[])
               "renderer registered for Sprite in this test environment)\n", ok ? "OK" : "FAILED");
     }
 
-    if (gc->tile_fill != NULL)
-    {
-        _kernel_oserror *err;
-        ok = gc->tile_fill(gc, FILETYPE_SPRITE, "tick", 100, 500, 300, 700);
-        printf("tile_fill(tick, no system area loaded - expect a sprite/area\n"
-              "  error, NOT an unknown-reason-code error): %s\n", ok ? "OK" : "FAILED");
-        err = _swix(OS_SpriteOp, _INR(0, 7), 65, 0, "tick", 100, 500, 0, 0, 0);
-        if (err != NULL)
-            printf("  direct OS_SpriteOp 65 error: %d: %s\n", err->errnum, err->errmess);
-        else
-            printf("  direct OS_SpriteOp 65: OK\n");
-    }
     if (load_sprites("TestSprites") == 0)
     {
-        _kernel_oserror *err;
-        /* gc->tile_fill() cannot be exercised here: its interface only
-           supports name lookup in the system/Wimp sprite pool (+0),
-           not a private user area pointer - a real API gap, not
-           something to work around by faking a system-area sprite.
-           Call OS_SpriteOp 65 directly, addressed at the private area
-           (+256), to prove tiling itself works against correctly-
-           loaded sprite data. */
-        err = _swix(OS_SpriteOp, _INR(0, 7), 65 + 256, test_sprite_area, "tick", 100, 500, 0, 0,
-                   0);
-        if (err != NULL)
-            printf("direct OS_SpriteOp 65+256 (private user area): FAILED: %d: %s\n",
-                  err->errnum, err->errmess);
-        else
-            printf("direct OS_SpriteOp 65+256 (private user area): OK\n");
+        void *sprite_pointer;
+
+        if (gc->tile_fill != NULL)
+        {
+            ok = gc->tile_fill(gc, FILETYPE_SPRITE, test_sprite_area, "tick", 100, 500, 300, 700);
+            printf("tile_fill(area, name \"tick\"): %s\n", ok ? "OK" : "FAILED");
+        }
+
+        /* The private area's only sprite starts right after the
+           16-byte area header, giving a real sprite pointer to
+           exercise the GCONTEXT_NO_SPRITE_AREA path without a
+           separate OS_SpriteOp 24 (Select Sprite) call. */
+        sprite_pointer = (char *) test_sprite_area + 16;
+        if (gc->tile_fill != NULL)
+        {
+            ok = gc->tile_fill(gc, FILETYPE_SPRITE, GCONTEXT_NO_SPRITE_AREA, sprite_pointer,
+                               100, 500, 300, 700);
+            printf("tile_fill(GCONTEXT_NO_SPRITE_AREA, sprite pointer): %s\n",
+                  ok ? "OK" : "FAILED");
+        }
+
         free(test_sprite_area);
         test_sprite_area = NULL;
     }

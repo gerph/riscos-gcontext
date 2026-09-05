@@ -65,6 +65,14 @@ typedef uint32_t gcontext_filetype_t;
    tile_fill supports (OS_SpriteOp has no equivalent for Draw/JPEG). */
 #define GCONTEXT_FILETYPE_SPRITE ((gcontext_filetype_t)0xFF9)
 
+/* Pass as tile_fill's area to mean "name_or_sprite_pointer is itself a
+   sprite control-block pointer, not a name" - no area is needed to
+   locate a sprite that way. There is no "system sprite area" reading
+   of this value: applications must never use the system area, so
+   tile_fill always requires either a real user sprite area, or a
+   direct sprite pointer via this constant. */
+#define GCONTEXT_NO_SPRITE_AREA ((void *)0)
+
 /* When no font can be returned */
 #define FONT_NONE ((font_t)(NULL))
 
@@ -157,12 +165,19 @@ typedef struct gcontext_s {
     /* Tile a sprite to fill a rectangle. Note: Will be NULL if not
        supported by this backend, and returns false for any filetype
        other than GCONTEXT_FILETYPE_SPRITE - Draw/JPEG/etc have no
-       tiling equivalent (OS_SpriteOp only handles sprites). name
-       identifies the sprite, exactly as for image_plot_file's
-       filename (a bare name for the Wimp sprite pool, or a
-       caller-defined convention for a named source file). */
+       tiling equivalent (OS_SpriteOp only handles sprites).
+
+       area = pointer to a sprite area the caller owns (built and
+              loaded by the caller - never the system sprite area,
+              which applications must not use), or GCONTEXT_NO_SPRITE_AREA.
+       name_or_sprite_pointer = if area is not GCONTEXT_NO_SPRITE_AREA,
+              a pointer to the NUL-terminated sprite name to look up
+              within area; if area is GCONTEXT_NO_SPRITE_AREA, this is
+              itself a pointer to the sprite's control block (no area
+              is needed to locate a sprite that way). */
     bool (*tile_fill)(struct gcontext_s *gc,
-                      gcontext_filetype_t filetype, const char *name,
+                      gcontext_filetype_t filetype,
+                      void *area, const void *name_or_sprite_pointer,
                       int32_t x0, int32_t y0, int32_t x1, int32_t y1);
 
     void (*backend_destroy)(struct gcontext_s *gc);
