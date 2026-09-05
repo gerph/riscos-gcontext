@@ -59,37 +59,57 @@ static void diagnose_render(int32_t filetype, const void *data, size_t length)
         printf("  diagnose_render(filetype &%x): OK\n", (unsigned) filetype);
 }
 
+/* Set by load_sprites() to the private user sprite area it builds, so
+   main() can address sprites in it directly (+256) - gc->tile_fill()
+   itself cannot: its interface only supports name lookup in the
+   system/Wimp sprite pool (+0), which is a real, separate API gap,
+   not something this test can paper over. */
+static void *test_sprite_area;
+
 /*************************************************** Gerph *********
  Function:      load_sprites
- Description:   Gives the system sprite area some memory (its only
-                criterion for existing at all - see the riscos-output
-                skill's sprites-areas.md), then loads a real spritefile
-                into it, so tile_fill has a real sprite to plot.
+ Description:   Builds a private user sprite area and loads a real
+                spritefile into it. Applications must not use the
+                system sprite area (see the riscos-output skill's
+                sprites-areas.md) - this is the correct pattern.
  Parameters:    filename = spritefile to load
  Returns:       0 if successful, 1 if failed
  ******************************************************************/
 static int load_sprites(const char *filename)
 {
     _kernel_oserror *err;
-    err = _swix(OS_ChangeDynamicArea, _INR(0, 1), 3, 65536);
-    if (err != NULL)
+    size_t area_size = 4096;
+    uint32_t *header;
+
+    test_sprite_area = malloc(area_size);
+    if (test_sprite_area == NULL)
     {
-        printf("load_sprites: OS_ChangeDynamicArea failed: %s\n", err->errmess);
+        printf("load_sprites: malloc failed\n");
         return 1;
     }
-    err = _swix(OS_SpriteOp, _INR(0, 2), 9, 0, 0);       /* Initialise system sprite area */
+    /* Per the sprite area header layout, the caller must prefill the
+       total size (offset 0) and the first sprite offset (offset 8,
+       normally 16); OS_SpriteOp 9 fills in the rest. */
+    header = (uint32_t *) test_sprite_area;
+    header[0] = (uint32_t) area_size;
+    header[2] = 16;
+    err = _swix(OS_SpriteOp, _INR(0, 1), 9 + 256, test_sprite_area);
     if (err != NULL)
     {
-        printf("load_sprites: OS_SpriteOp 9 failed: %s\n", err->errmess);
+        printf("load_sprites: OS_SpriteOp 9+256 failed: %s\n", err->errmess);
+        free(test_sprite_area);
+        test_sprite_area = NULL;
         return 1;
     }
-    err = _swix(OS_SpriteOp, _INR(0, 2), 10, 0, filename);
+    err = _swix(OS_SpriteOp, _INR(0, 2), 10 + 256, test_sprite_area, filename);
     if (err != NULL)
     {
-        printf("load_sprites: FAILED: %s\n", err->errmess);
+        printf("load_sprites: OS_SpriteOp 10+256 failed: %s\n", err->errmess);
+        free(test_sprite_area);
+        test_sprite_area = NULL;
         return 1;
     }
-    printf("load_sprites: OK\n");
+    printf("load_sprites: OK (private user area)\n");
     return 0;
 }
 
@@ -137,10 +157,25 @@ int main(int argc, char *argv[])
         else
             printf("  direct OS_SpriteOp 65: OK\n");
     }
-    if (load_sprites("TestSprites") == 0 && gc->tile_fill != NULL)
+    if (load_sprites("TestSprites") == 0)
     {
-        ok = gc->tile_fill(gc, FILETYPE_SPRITE, "tick", 100, 500, 300, 700);
-        printf("tile_fill(tick, real sprite from system area): %s\n", ok ? "OK" : "FAILED");
+        _kernel_oserror *err;
+        /* gc->tile_fill() cannot be exercised here: its interface only
+           supports name lookup in the system/Wimp sprite pool (+0),
+           not a private user area pointer - a real API gap, not
+           something to work around by faking a system-area sprite.
+           Call OS_SpriteOp 65 directly, addressed at the private area
+           (+256), to prove tiling itself works against correctly-
+           loaded sprite data. */
+        err = _swix(OS_SpriteOp, _INR(0, 7), 65 + 256, test_sprite_area, "tick", 100, 500, 0, 0,
+                   0);
+        if (err != NULL)
+            printf("direct OS_SpriteOp 65+256 (private user area): FAILED: %d: %s\n",
+                  err->errnum, err->errmess);
+        else
+            printf("direct OS_SpriteOp 65+256 (private user area): OK\n");
+        free(test_sprite_area);
+        test_sprite_area = NULL;
     }
 
     gcontext_destroy(gc);
