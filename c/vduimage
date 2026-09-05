@@ -131,6 +131,62 @@ bool gcontext_vdu_image_plot_file(gcontext_t *gc, gcontext_filetype_t filetype,
 }
 
 /*************************************************** Gerph *********
+ Function:     build_sprite_translation_table
+ Description:  Builds a pixel translation table (ColourTrans_SelectTable)
+               mapping the sprite's own palette to the current screen
+               mode/palette, for passing to a scaled sprite plot -
+               without one, a sprite whose palette differs from the
+               current mode's (eg an old-format 4bpp sprite defined in
+               a different mode) is plotted using its raw pixel values
+               as if they were already the destination's colour
+               numbers, producing wrong colours.
+ Parameters:   area = sprite area, or GCONTEXT_NO_SPRITE_AREA
+               name_or_sprite_pointer = sprite name within area, or a
+                                        direct sprite pointer if area
+                                        is GCONTEXT_NO_SPRITE_AREA
+ Returns:      Malloc'd table (caller frees), or NULL if one couldn't
+               be built - callers should fall back to no translation
+               (R7 = 0) rather than failing the whole plot.
+ ******************************************************************/
+static void *build_sprite_translation_table(void *area, const void *name_or_sprite_pointer)
+{
+    _kernel_oserror *err;
+    int32_t source;
+    int32_t flags;
+    int32_t buffer_size;
+    void *buffer;
+    if (area != GCONTEXT_NO_SPRITE_AREA)
+    {
+        /* R0 = real area pointer, R1 = sprite name pointer (bit 0 of
+           R5 clear). */
+        source = (int32_t) area;
+        flags = 0;
+    }
+    else
+    {
+        /* R0 = 256 means "not a sprite area pointer - R1 points
+           directly to a sprite" (bit 0 of R5 set to match). */
+        source = 256;
+        flags = 1;
+    }
+    err = _swix(ColourTrans_SelectTable, _INR(0, 5) | _OUT(4), source, name_or_sprite_pointer,
+               -1, -1, 0, flags, &buffer_size);
+    if (err != NULL || buffer_size <= 0)
+        return NULL;
+    buffer = malloc((size_t) buffer_size);
+    if (buffer == NULL)
+        return NULL;
+    err = _swix(ColourTrans_SelectTable, _INR(0, 5), source, name_or_sprite_pointer, -1, -1,
+               buffer, flags);
+    if (err != NULL)
+    {
+        free(buffer);
+        return NULL;
+    }
+    return buffer;
+}
+
+/*************************************************** Gerph *********
  Function:     gcontext_vdu_tile_fill
  Description:  Tile a sprite to fill a box, via OS_SpriteOp 65 (Tile
                Sprite Scaled, SpriteExtend 1.73+) - a genuine native
@@ -161,6 +217,7 @@ bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype,
     bbox_t saved_window;
     bbox_t tile_window;
     int32_t reason;
+    void *translation_table;
     bool ok;
     (void) gc;
     if (filetype != GCONTEXT_FILETYPE_SPRITE || name_or_sprite_pointer == NULL)
@@ -173,13 +230,22 @@ bool gcontext_vdu_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype,
     tile_window.y1 = y1;
     if (screen_set_graphics_window(&tile_window) != 0)
         return false;
+    /* Without a translation table, the sprite's raw pixel values are
+       used as destination colour numbers directly, which is wrong
+       whenever the sprite's own palette differs from the current
+       mode's - see build_sprite_translation_table(). A NULL result
+       (table couldn't be built) falls back to no translation rather
+       than failing the plot outright. */
+    translation_table = build_sprite_translation_table(area, name_or_sprite_pointer);
     /* area given: +256, R1=area, R2=name. No area: +512, R1 unused (a
        sprite pointer is self-locating), R2=sprite pointer. Either way,
        R3,R4=origin, R5=plot action (0=overwrite), R6=scale factors
-       (0=1:1), R7=pixel translation table (0=none). */
+       (0=1:1), R7=pixel translation table. */
     reason = area != GCONTEXT_NO_SPRITE_AREA ? 65 + 256 : 65 + 512;
-    err = _swix(OS_SpriteOp, _INR(0, 7), reason, area, name_or_sprite_pointer, x0, y0, 0, 0, 0);
+    err = _swix(OS_SpriteOp, _INR(0, 7), reason, area, name_or_sprite_pointer, x0, y0, 0, 0,
+               translation_table);
     ok = (err == NULL);
+    free(translation_table);
     screen_set_graphics_window(&saved_window);
     return ok;
 }
