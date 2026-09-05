@@ -61,21 +61,28 @@ static void diagnose_render(int32_t filetype, const void *data, size_t length)
 
 /*************************************************** Gerph *********
  Function:      load_sprites
- Description:   Loads a real Wimp spritefile into the system sprite
-                area, so tile_fill has a real sprite to plot. Expects
-                to be run against a copy of a real sprite file named
-                "TestSprites" placed alongside this program (not
-                included in this repo) containing a sprite called
-                "tick" - without one, this always fails, which is
-                itself a useful, expected diagnostic result in an
-                environment with no system sprite area configured.
+ Description:   Gives the system sprite area some memory (its only
+                criterion for existing at all - see the riscos-output
+                skill's sprites-areas.md), then loads a real spritefile
+                into it, so tile_fill has a real sprite to plot.
  Parameters:    filename = spritefile to load
  Returns:       0 if successful, 1 if failed
  ******************************************************************/
 static int load_sprites(const char *filename)
 {
     _kernel_oserror *err;
-    err = _swix(OS_SpriteOp, _INR(0, 2), 9, 0, 0);       /* Initialise system sprite area (no-op if already init) */
+    err = _swix(OS_ChangeDynamicArea, _INR(0, 1), 3, 65536);
+    if (err != NULL)
+    {
+        printf("load_sprites: OS_ChangeDynamicArea failed: %s\n", err->errmess);
+        return 1;
+    }
+    err = _swix(OS_SpriteOp, _INR(0, 2), 9, 0, 0);       /* Initialise system sprite area */
+    if (err != NULL)
+    {
+        printf("load_sprites: OS_SpriteOp 9 failed: %s\n", err->errmess);
+        return 1;
+    }
     err = _swix(OS_SpriteOp, _INR(0, 2), 10, 0, filename);
     if (err != NULL)
     {
