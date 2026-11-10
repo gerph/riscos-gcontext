@@ -37,6 +37,11 @@ jobs:
           riscos-amu
           riscos-amu export
 
+      - name: Build the font test
+        run: |
+          riscos-amu -f MakefileTestFont,fe1 BUILD64=1
+          riscos-amu -f MakefileTestFont,fe1
+
       - name: Create archive of exports
         run: |
           mkdir -p Artifacts/Lib

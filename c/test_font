@@ -1,0 +1,38 @@
+/*******************************************************************
+ * File:        test_font
+ * Purpose:     Exercise the font claiming and releasing interfaces
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <assert.h>
+#include <stdlib.h>
+
+#include "gcontext.h"
+#include "font.h"
+
+void test_find(gcontext_t *gc)
+{
+    font_t font;
+
+    /* We should be able to find the font */
+    font = font_findfont(gc, "Homerton.Medium", 16*16, 16*16);
+    assert(font != FONT_NONE && "Should be able to find Homerton.Medium");
+    font_losefont(gc, font);
+
+    /* We should be able to report a non-existant font */
+    font = font_findfont(gc, "NonExistant.Font.Name", 16*16, 16*16);
+    assert(font == FONT_NONE && "Should not be able to find non-existant font");
+}
+
+
+int main(int argc, char *argv[])
+{
+    gcontext_t *gc = gcontext_initvdu(1);
+    assert(gc != NULL && "Should be able to create a VDU graphics context");
+
+    test_find(gc);
+
+    gcontext_destroy(gc);
+
+    return 0;
+}
