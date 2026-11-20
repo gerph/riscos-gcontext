@@ -303,6 +303,17 @@ int32_t gcontext_svg_finalise(struct gcontext_s *gc);
 int32_t gcontext_svg_datasize(struct gcontext_s *gc);
 
 /*************************************************** Gerph *********
+ Function:     gcontext_initrecord
+ Description:  Initialise a graphics context which records every operation
+               it is given instead of plotting it, so that drawing code can
+               be tested without a screen. The records are examined through
+               the calls of gcrecord.h.
+ Parameters:   none
+ Returns:      gcontext_t to use for plotting, or NULL if unavailable
+ ******************************************************************/
+struct gcontext_s *gcontext_initrecord(void);
+
+/*************************************************** Gerph *********
  Function:     gcontext_destroy
  Description:  Release a graphics context and any backend state
  Parameters:   gc-> graphics context

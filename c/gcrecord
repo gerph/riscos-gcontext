@@ -1,0 +1,661 @@
+/*******************************************************************
+ * File:        gcrecord
+ * Purpose:     A recording GContext back end (see h/gcrecord).
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "gcrecord.h"
+
+/* A font is a handle which holds what it was asked for */
+struct font_s {
+    char    name[GCR_TEXT_MAX + 1];
+    int32_t xsize, ysize;
+    int     live;
+};
+
+typedef struct recorder_s {
+    gcrecord_t *records;
+    int         count;
+    int         capacity;
+    int32_t     char_width, ascent, descent;
+    struct font_s **fonts;                /* Every font made, to free them */
+    int         font_count;
+    int         font_capacity;
+} recorder_t;
+
+static recorder_t *recorder_of(const gcontext_t *gc)
+{
+    return (recorder_t *)gc->backend_private;
+}
+
+/* Add a record, filled with the clip as it is now; NULL if memory ran out */
+static gcrecord_t *add(gcontext_t *gc, gcrecord_kind_t kind)
+{
+    recorder_t *r = recorder_of(gc);
+    gcrecord_t *rec;
+
+    if (r->count == r->capacity)
+    {
+        int capacity = r->capacity ? r->capacity * 2 : 64;
+        gcrecord_t *bigger = (gcrecord_t *)realloc(r->records,
+                                                   (size_t)capacity * sizeof(gcrecord_t));
+
+        if (bigger == NULL)
+        {
+            return NULL;
+        }
+        r->records = bigger;
+        r->capacity = capacity;
+    }
+    rec = &r->records[r->count++];
+    memset(rec, 0, sizeof(*rec));
+    rec->kind = kind;
+    rec->has_clip = (gc->clipstate == cs_clip);
+    rec->clip = gc->clipping;
+    return rec;
+}
+
+static void copy_text(gcrecord_t *rec, const char *text, int size)
+{
+    size_t n;
+
+    if (text == NULL)
+    {
+        return;
+    }
+    n = (size == GCONTEXT_ZEROTERM) ? strlen(text) : (size_t)size;
+    if (n > GCR_TEXT_MAX)
+    {
+        n = GCR_TEXT_MAX;
+    }
+    memcpy(rec->text, text, n);
+    rec->text[n] = '\0';
+}
+
+/* The length of a string in characters, as it was given */
+static size_t string_length(const char *text, int size)
+{
+    return (size == GCONTEXT_ZEROTERM) ? strlen(text) : (size_t)size;
+}
+
+/*******************************************************************
+ The operations
+ ******************************************************************/
+
+static void op_rectangle_fill(gcontext_t *gc, colour_t colour,
+                              int x0, int y0, int x1, int y1)
+{
+    gcrecord_t *rec = add(gc, GCR_RECTANGLE_FILL);
+
+    if (rec) { rec->colour = colour; rec->x0 = x0; rec->y0 = y0; rec->x1 = x1; rec->y1 = y1; }
+}
+
+static void op_rectangle_outline(gcontext_t *gc, colour_t colour,
+                                 int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    gcrecord_t *rec = add(gc, GCR_RECTANGLE_OUTLINE);
+
+    if (rec) { rec->colour = colour; rec->x0 = x0; rec->y0 = y0; rec->x1 = x1; rec->y1 = y1; }
+}
+
+static void op_triangle_fill(gcontext_t *gc, colour_t colour, int32_t x0, int32_t y0,
+                             int32_t x1, int32_t y1, int32_t x2, int32_t y2)
+{
+    gcrecord_t *rec = add(gc, GCR_TRIANGLE_FILL);
+
+    if (rec)
+    {
+        rec->colour = colour;
+        rec->x0 = x0; rec->y0 = y0; rec->x1 = x1; rec->y1 = y1;
+        rec->x2 = x2; rec->y2 = y2;
+    }
+}
+
+static void op_line_start(gcontext_t *gc, colour_t colour)
+{
+    gcrecord_t *rec = add(gc, GCR_LINE_START);
+
+    if (rec) { rec->colour = colour; }
+}
+
+static void line_op(gcontext_t *gc, gcrecord_kind_t kind,
+                    int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    gcrecord_t *rec = add(gc, kind);
+
+    if (rec) { rec->x0 = x0; rec->y0 = y0; rec->x1 = x1; rec->y1 = y1; }
+}
+
+static void op_line_line(gcontext_t *gc, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    line_op(gc, GCR_LINE_LINE, x0, y0, x1, y1);
+}
+
+static void op_line_dotted(gcontext_t *gc, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    line_op(gc, GCR_LINE_DOTTED, x0, y0, x1, y1);
+}
+
+static void op_line_dashed(gcontext_t *gc, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    line_op(gc, GCR_LINE_DASHED, x0, y0, x1, y1);
+}
+
+static void op_line_end(gcontext_t *gc)
+{
+    add(gc, GCR_LINE_END);
+}
+
+static void op_fill_start(gcontext_t *gc, colour_t colour)
+{
+    gcrecord_t *rec = add(gc, GCR_FILL_START);
+
+    if (rec) { rec->colour = colour; }
+}
+
+static void op_fill_move(gcontext_t *gc, int32_t x, int32_t y)
+{
+    gcrecord_t *rec = add(gc, GCR_FILL_MOVE);
+
+    if (rec) { rec->x0 = x; rec->y0 = y; }
+}
+
+static void op_fill_line(gcontext_t *gc, int32_t x, int32_t y)
+{
+    gcrecord_t *rec = add(gc, GCR_FILL_LINE);
+
+    if (rec) { rec->x0 = x; rec->y0 = y; }
+}
+
+static void op_fill_close(gcontext_t *gc) { add(gc, GCR_FILL_CLOSE); }
+static void op_fill_end(gcontext_t *gc) { add(gc, GCR_FILL_END); }
+
+static font_t op_text_findfont(gcontext_t *gc, const char *name, int xsize, int ysize)
+{
+    recorder_t *r = recorder_of(gc);
+    gcrecord_t *rec = add(gc, GCR_TEXT_FINDFONT);
+    struct font_s *font = (struct font_s *)calloc(1, sizeof(struct font_s));
+
+    if (font == NULL)
+    {
+        return FONT_NONE;
+    }
+    if (r->font_count == r->font_capacity)
+    {
+        int capacity = r->font_capacity ? r->font_capacity * 2 : 8;
+        struct font_s **bigger = (struct font_s **)realloc(r->fonts,
+                                                           (size_t)capacity * sizeof(*bigger));
+
+        if (bigger == NULL)
+        {
+            free(font);
+            return FONT_NONE;
+        }
+        r->fonts = bigger;
+        r->font_capacity = capacity;
+    }
+    r->fonts[r->font_count++] = font;
+    strncpy(font->name, name ? name : "", GCR_TEXT_MAX);
+    font->xsize = xsize;
+    font->ysize = ysize;
+    font->live = 1;
+    if (rec)
+    {
+        copy_text(rec, name, GCONTEXT_ZEROTERM);
+        rec->x0 = xsize;
+        rec->y0 = ysize;
+        rec->font = font;
+    }
+    return font;
+}
+
+static void op_text_losefont(gcontext_t *gc, font_t font)
+{
+    gcrecord_t *rec = add(gc, GCR_TEXT_LOSEFONT);
+
+    if (rec) { rec->font = font; }
+    if (font) { font->live = 0; }
+}
+
+static uint32_t op_text_readhandle(gcontext_t *gc, font_t font)
+{
+    (void)gc;
+    return (uint32_t)(((size_t)font) & 0xFFFFFFFFu);
+}
+
+static void op_text_getstringsize(gcontext_t *gc, font_t font, stringbounds_t *bounds,
+                                  int32_t xlimit, const char *str, int strsize,
+                                  int split_char)
+{
+    recorder_t *r = recorder_of(gc);
+    size_t length = string_length(str, strsize);
+    size_t fit = length;
+
+    (void)font;
+    bounds->ascent = r->ascent;
+    bounds->descent = r->descent;
+    bounds->lbearing = 0;
+    bounds->rbearing = 0;
+    bounds->charoffset = (int32_t)length;
+    /* With a limit that the string does not fit, a split character gives the
+     * last place at or before the limit to break at; otherwise the whole
+     * string is reported, as a caller must be prepared for */
+    if (xlimit >= 0 && r->char_width > 0 && (int32_t)length * r->char_width > xlimit)
+    {
+        size_t room = (size_t)(xlimit / r->char_width);
+        size_t i;
+
+        fit = length;
+        bounds->charoffset = 0;
+        if (split_char != GCONTEXT_NOSPLIT)
+        {
+            /* The text up to the limit fits, so the split character may be
+             * the first one beyond it: search from there backwards */
+            for (i = (room < length - 1 ? room : length - 1) + 1; i > 0; i--)
+            {
+                if ((unsigned char)str[i - 1] == (unsigned)split_char)
+                {
+                    fit = i - 1;
+                    bounds->charoffset = (int32_t)(i - 1);
+                    break;
+                }
+            }
+        }
+    }
+    bounds->xoffset = (int32_t)fit * r->char_width;
+}
+
+static bounds_t op_text_getemsize(gcontext_t *gc, font_t font)
+{
+    recorder_t *r = recorder_of(gc);
+    bounds_t size;
+
+    (void)font;
+    size.width = r->char_width;
+    size.height = r->ascent + r->descent;
+    return size;
+}
+
+static coords_t op_text_paint(gcontext_t *gc, font_t font, int32_t xb, int32_t yb,
+                              colour_t bg, colour_t fg, const char *str, int strsize)
+{
+    recorder_t *r = recorder_of(gc);
+    gcrecord_t *rec = add(gc, GCR_TEXT_PAINT);
+    coords_t end;
+
+    if (rec)
+    {
+        rec->font = font;
+        rec->x0 = xb; rec->y0 = yb;
+        rec->colour = fg; rec->colour2 = bg;
+        rec->length = strsize;
+        copy_text(rec, str, strsize);
+    }
+    end.x = xb + (int32_t)string_length(str, strsize) * r->char_width;
+    end.y = yb;
+    return end;
+}
+
+static coords_t op_text_paintattrib(gcontext_t *gc, font_t font, int32_t x, int32_t y,
+                                    int32_t x1, int32_t y1, const char *str, int strsize,
+                                    colour_t bg, colour_t fg, uint32_t attrib)
+{
+    recorder_t *r = recorder_of(gc);
+    gcrecord_t *rec = add(gc, GCR_TEXT_PAINTATTRIB);
+    coords_t end;
+
+    if (rec)
+    {
+        rec->font = font;
+        rec->x0 = x; rec->y0 = y; rec->x1 = x1; rec->y1 = y1;
+        rec->colour = fg; rec->colour2 = bg;
+        rec->attrib = attrib;
+        rec->length = strsize;
+        copy_text(rec, str, strsize);
+    }
+    end.x = x + (int32_t)string_length(str, strsize) * r->char_width;
+    end.y = y;
+    return end;
+}
+
+static bool op_image_plot_file(gcontext_t *gc, gcontext_filetype_t filetype,
+                               const char *filename,
+                               int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    gcrecord_t *rec = add(gc, GCR_IMAGE_PLOT_FILE);
+
+    if (rec)
+    {
+        rec->attrib = (uint32_t)filetype;
+        copy_text(rec, filename, GCONTEXT_ZEROTERM);
+        rec->x0 = x0; rec->y0 = y0; rec->x1 = x1; rec->y1 = y1;
+    }
+    return true;
+}
+
+static bool op_image_plot_data(gcontext_t *gc, gcontext_filetype_t filetype,
+                               const void *data, size_t length,
+                               int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    gcrecord_t *rec = add(gc, GCR_IMAGE_PLOT_DATA);
+
+    (void)data;
+    if (rec)
+    {
+        rec->attrib = (uint32_t)filetype;
+        rec->length = (int32_t)length;
+        rec->x0 = x0; rec->y0 = y0; rec->x1 = x1; rec->y1 = y1;
+    }
+    return true;
+}
+
+static bool op_tile_fill(gcontext_t *gc, gcontext_filetype_t filetype,
+                         void *area, const void *name_or_sprite_pointer,
+                         int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+{
+    gcrecord_t *rec = add(gc, GCR_TILE_FILL);
+
+    if (rec)
+    {
+        rec->attrib = (uint32_t)filetype;
+        if (area == GCONTEXT_NO_SPRITE_AREA)
+        {
+            rec->length = 1;        /* A pointer to the sprite, not a name */
+        }
+        else
+        {
+            copy_text(rec, (const char *)name_or_sprite_pointer, GCONTEXT_ZEROTERM);
+        }
+        rec->x0 = x0; rec->y0 = y0; rec->x1 = x1; rec->y1 = y1;
+    }
+    return true;
+}
+
+static bool op_clip_rectangle(gcontext_t *gc, bbox_t *bbox)
+{
+    gcrecord_t *rec;
+
+    /* Set the clip first, so that the record shows the clip it set */
+    if (bbox == NULL)
+    {
+        gc->clipstate = cs_noclip;
+        memset(&gc->clipping, 0, sizeof(gc->clipping));
+    }
+    else
+    {
+        gc->clipping = *bbox;
+        gc->clipstate = cs_clip;
+    }
+    rec = add(gc, GCR_CLIP);
+    if (rec && bbox)
+    {
+        rec->x0 = bbox->x0; rec->y0 = bbox->y0;
+        rec->x1 = bbox->x1; rec->y1 = bbox->y1;
+    }
+    return true;
+}
+
+static void op_backend_destroy(gcontext_t *gc)
+{
+    (void)gc;
+}
+
+/*******************************************************************
+ Public functions
+ ******************************************************************/
+
+gcontext_t *gcontext_initrecord(void)
+{
+    gcontext_t *gc = (gcontext_t *)calloc(1, sizeof(gcontext_t));
+    recorder_t *r = (recorder_t *)calloc(1, sizeof(recorder_t));
+
+    if (gc == NULL || r == NULL)
+    {
+        free(gc);
+        free(r);
+        return NULL;
+    }
+    r->char_width = 8;
+    r->ascent = 12;
+    r->descent = 4;
+    gc->rectangle_fill = op_rectangle_fill;
+    gc->rectangle_outline = op_rectangle_outline;
+    gc->triangle_fill = op_triangle_fill;
+    gc->line_start = op_line_start;
+    gc->line_line = op_line_line;
+    gc->line_dotted = op_line_dotted;
+    gc->line_dashed = op_line_dashed;
+    gc->line_end = op_line_end;
+    gc->fill_start = op_fill_start;
+    gc->fill_move = op_fill_move;
+    gc->fill_line = op_fill_line;
+    gc->fill_close = op_fill_close;
+    gc->fill_end = op_fill_end;
+    gc->text_findfont = op_text_findfont;
+    gc->text_losefont = op_text_losefont;
+    gc->text_readhandle = op_text_readhandle;
+    gc->text_getstringsize = op_text_getstringsize;
+    gc->text_getemsize = op_text_getemsize;
+    gc->text_paint = op_text_paint;
+    gc->text_paintattrib = op_text_paintattrib;
+    gc->clip_rectangle = op_clip_rectangle;
+    gc->image_plot_file = op_image_plot_file;
+    gc->image_plot_data = op_image_plot_data;
+    gc->tile_fill = op_tile_fill;
+    gc->backend_destroy = op_backend_destroy;
+    gc->backend_finalise = NULL;
+    gc->backend_datasize = NULL;
+    gc->clipstate = cs_noclip;
+    gc->backend_private = r;
+    return gc;
+}
+
+void gcrecord_destroy(gcontext_t *gc)
+{
+    recorder_t *r;
+    int i;
+
+    if (gc == NULL)
+    {
+        return;
+    }
+    r = recorder_of(gc);
+    for (i = 0; i < r->font_count; i++)
+    {
+        free(r->fonts[i]);
+    }
+    free(r->fonts);
+    free(r->records);
+    free(r);
+    free(gc);
+}
+
+int gcrecord_count(const gcontext_t *gc)
+{
+    return gc ? recorder_of(gc)->count : 0;
+}
+
+const gcrecord_t *gcrecord_get(const gcontext_t *gc, int index)
+{
+    if (gc == NULL || index < 0 || index >= recorder_of(gc)->count)
+    {
+        return NULL;
+    }
+    return &recorder_of(gc)->records[index];
+}
+
+int gcrecord_count_kind(const gcontext_t *gc, gcrecord_kind_t kind)
+{
+    int i;
+    int n = 0;
+
+    for (i = 0; gc && i < recorder_of(gc)->count; i++)
+    {
+        if (recorder_of(gc)->records[i].kind == kind)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+void gcrecord_clear(gcontext_t *gc)
+{
+    if (gc)
+    {
+        recorder_of(gc)->count = 0;
+    }
+}
+
+void gcrecord_set_font_metrics(gcontext_t *gc, int32_t char_width,
+                               int32_t ascent, int32_t descent)
+{
+    if (gc)
+    {
+        recorder_of(gc)->char_width = char_width;
+        recorder_of(gc)->ascent = ascent;
+        recorder_of(gc)->descent = descent;
+    }
+}
+
+static const char *kind_name(gcrecord_kind_t kind)
+{
+    switch (kind)
+    {
+    case GCR_RECTANGLE_FILL:    return "rectangle_fill";
+    case GCR_RECTANGLE_OUTLINE: return "rectangle_outline";
+    case GCR_TRIANGLE_FILL:     return "triangle_fill";
+    case GCR_LINE_START:        return "line_start";
+    case GCR_LINE_LINE:         return "line_line";
+    case GCR_LINE_DOTTED:       return "line_dotted";
+    case GCR_LINE_DASHED:       return "line_dashed";
+    case GCR_LINE_END:          return "line_end";
+    case GCR_FILL_START:        return "fill_start";
+    case GCR_FILL_MOVE:         return "fill_move";
+    case GCR_FILL_LINE:         return "fill_line";
+    case GCR_FILL_CLOSE:        return "fill_close";
+    case GCR_FILL_END:          return "fill_end";
+    case GCR_TEXT_FINDFONT:     return "text_findfont";
+    case GCR_TEXT_LOSEFONT:     return "text_losefont";
+    case GCR_TEXT_PAINT:        return "text_paint";
+    case GCR_TEXT_PAINTATTRIB:  return "text_paintattrib";
+    case GCR_CLIP:              return "clip";
+    case GCR_IMAGE_PLOT_FILE:   return "image_plot_file";
+    case GCR_IMAGE_PLOT_DATA:   return "image_plot_data";
+    case GCR_TILE_FILL:         return "tile_fill";
+    default:                    return "unknown";
+    }
+}
+
+/* One record as a line of text */
+static void format_record(const gcrecord_t *r, char *line)
+{
+    char *p = line;
+
+    p += sprintf(p, "%s", kind_name(r->kind));
+    switch (r->kind)
+    {
+    case GCR_RECTANGLE_FILL:
+    case GCR_RECTANGLE_OUTLINE:
+        sprintf(p, " colour=%08lx %ld,%ld %ld,%ld", (unsigned long)r->colour,
+                (long)r->x0, (long)r->y0, (long)r->x1, (long)r->y1);
+        break;
+    case GCR_TRIANGLE_FILL:
+        sprintf(p, " colour=%08lx %ld,%ld %ld,%ld %ld,%ld", (unsigned long)r->colour,
+                (long)r->x0, (long)r->y0, (long)r->x1, (long)r->y1,
+                (long)r->x2, (long)r->y2);
+        break;
+    case GCR_LINE_START:
+    case GCR_FILL_START:
+        sprintf(p, " colour=%08lx", (unsigned long)r->colour);
+        break;
+    case GCR_LINE_LINE:
+    case GCR_LINE_DOTTED:
+    case GCR_LINE_DASHED:
+        sprintf(p, " %ld,%ld %ld,%ld", (long)r->x0, (long)r->y0,
+                (long)r->x1, (long)r->y1);
+        break;
+    case GCR_FILL_MOVE:
+    case GCR_FILL_LINE:
+        sprintf(p, " %ld,%ld", (long)r->x0, (long)r->y0);
+        break;
+    case GCR_TEXT_FINDFONT:
+        sprintf(p, " \"%s\" %ld,%ld", r->text, (long)r->x0, (long)r->y0);
+        break;
+    case GCR_TEXT_PAINT:
+        sprintf(p, " %ld,%ld fg=%08lx bg=%08lx \"%s\"", (long)r->x0, (long)r->y0,
+                (unsigned long)r->colour, (unsigned long)r->colour2, r->text);
+        break;
+    case GCR_TEXT_PAINTATTRIB:
+        sprintf(p, " %ld,%ld %ld,%ld attrib=%lx fg=%08lx bg=%08lx \"%s\"",
+                (long)r->x0, (long)r->y0, (long)r->x1, (long)r->y1,
+                (unsigned long)r->attrib, (unsigned long)r->colour,
+                (unsigned long)r->colour2, r->text);
+        break;
+    case GCR_IMAGE_PLOT_FILE:
+        sprintf(p, " filetype=%03lx \"%s\" %ld,%ld %ld,%ld", (unsigned long)r->attrib, r->text,
+                (long)r->x0, (long)r->y0, (long)r->x1, (long)r->y1);
+        break;
+    case GCR_IMAGE_PLOT_DATA:
+        sprintf(p, " filetype=%03lx length=%ld %ld,%ld %ld,%ld", (unsigned long)r->attrib,
+                (long)r->length, (long)r->x0, (long)r->y0, (long)r->x1, (long)r->y1);
+        break;
+    case GCR_TILE_FILL:
+        if (r->length)
+        {
+            sprintf(p, " filetype=%03lx pointer %ld,%ld %ld,%ld", (unsigned long)r->attrib,
+                    (long)r->x0, (long)r->y0, (long)r->x1, (long)r->y1);
+        }
+        else
+        {
+            sprintf(p, " filetype=%03lx \"%s\" %ld,%ld %ld,%ld", (unsigned long)r->attrib, r->text,
+                    (long)r->x0, (long)r->y0, (long)r->x1, (long)r->y1);
+        }
+        break;
+    case GCR_CLIP:
+        if (r->has_clip)
+        {
+            sprintf(p, " %ld,%ld %ld,%ld", (long)r->x0, (long)r->y0,
+                    (long)r->x1, (long)r->y1);
+        }
+        else
+        {
+            sprintf(p, " none");
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+size_t gcrecord_dump(const gcontext_t *gc, char *buffer, size_t size)
+{
+    size_t needed = 0;
+    int i;
+
+    if (buffer && size > 0)
+    {
+        buffer[0] = '\0';
+    }
+    for (i = 0; gc && i < recorder_of(gc)->count; i++)
+    {
+        char line[GCR_TEXT_MAX * 2 + 200];
+        size_t length;
+
+        format_record(&recorder_of(gc)->records[i], line);
+        length = strlen(line);
+        if (buffer && needed + length + 1 < size)
+        {
+            memcpy(buffer + needed, line, length);
+            buffer[needed + length] = '\n';
+            buffer[needed + length + 1] = '\0';
+        }
+        needed += length + 1;
+    }
+    return needed;
+}

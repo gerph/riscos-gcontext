@@ -1,0 +1,27 @@
+#!/usr/bin/env riscos-amu -f
+# Makefile for the test of the recording back end, run on RISC OS.
+#   riscos-amu -f MakefileTestRecord,fe1
+#   riscos-build-run aif32 --command aif32.test_record
+
+COMPONENT  = test_record
+CLIBTYPE   = generic
+INCLUDES   =
+CDEFINES   =
+OBJS       = o.test_record \
+             o.gcontext \
+             o.gcrecord \
+             o.font \
+             o.clipping \
+             o.border \
+             o.vdu5 \
+             o.vdushape \
+             o.vduimage \
+             o.screen \
+             o.gcontext_drawfile \
+             o.gcontext_svg
+LIBS       = ${CLIB}
+
+include LibraryCommand
+
+#---------------------------------------------------------------------------
+# Dynamic dependencies:

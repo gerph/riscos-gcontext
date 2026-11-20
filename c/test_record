@@ -1,0 +1,86 @@
+/*******************************************************************
+ * File:        test_record
+ * Purpose:     Exercise the recording GContext back end on RISC OS,
+ *              through the library, including its destruction through
+ *              gcontext_destroy
+ * Author:      Gerph
+ *
+ * Built by MakefileTestRecord,fe1 and run as a command. It prints one line
+ * for each check, and a summary, and exits with 1 if any check failed. The
+ * back end is also tested on a host, with more checks, in tests/host.
+ ******************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "gcontext.h"
+#include "gcrecord.h"
+
+static int checks = 0;
+static int failures = 0;
+
+static void check(int ok, const char *what)
+{
+    checks++;
+    if (!ok)
+    {
+        failures++;
+        printf("FAIL: %s\n", what);
+    }
+}
+
+int main(void)
+{
+    gcontext_t *gc = gcontext_initrecord();
+    static const char data[4] = { 1, 2, 3, 4 };
+    bbox_t clip = { 0, 0, 100, 100 };
+    char dump[512];
+    int i;
+
+    check(gc != NULL, "the context is made");
+    if (gc == NULL)
+    {
+        return 1;
+    }
+
+    gc->rectangle_fill(gc, COLOUR_RGB(255, 0, 0), 0, 0, 100, 50);
+    gc->line_start(gc, COLOUR_RGB(0, 0, 0));
+    gc->line_line(gc, 0, 0, 100, 50);
+    gc->line_end(gc);
+    check(gcrecord_count(gc) == 4, "the shapes are recorded");
+    check(gcrecord_get(gc, 0)->kind == GCR_RECTANGLE_FILL && gcrecord_get(gc, 0)->x1 == 100,
+          "the rectangle has its arguments");
+
+    gc->clip_rectangle(gc, &clip);
+    gc->rectangle_fill(gc, COLOUR_RGB(0, 0, 255), 1, 2, 3, 4);
+    check(gcrecord_get(gc, gcrecord_count(gc) - 1)->has_clip, "a record notes the clip");
+    gc->clip_rectangle(gc, NULL);
+
+    check(gc->image_plot_file(gc, 0xFF9, "Sprites", 0, 0, 10, 10), "plot a file reports success");
+    check(gc->image_plot_data(gc, 0xFF9, data, sizeof(data), 0, 0, 10, 10), "plot data reports success");
+    check(gc->tile_fill(gc, GCONTEXT_FILETYPE_SPRITE, GCONTEXT_NO_SPRITE_AREA, data, 0, 0, 10, 10),
+          "tile fill reports success");
+    check(gcrecord_count_kind(gc, GCR_IMAGE_PLOT_FILE) == 1 && gcrecord_count_kind(gc, GCR_IMAGE_PLOT_DATA) == 1
+          && gcrecord_count_kind(gc, GCR_TILE_FILL) == 1, "the image operations are recorded");
+
+    for (i = 0; i < 1000; i++)
+    {
+        gc->rectangle_fill(gc, COLOUR_RGB(1, 2, 3), i, i, i + 1, i + 1);
+    }
+    check(gcrecord_count(gc) > 1000, "the records grow");
+
+    gcrecord_clear(gc);
+    check(gcrecord_count(gc) == 0, "the records are cleared");
+    gc->line_start(gc, COLOUR_RGB(0, 0, 0));
+    gc->line_end(gc);
+    check(gcrecord_dump(gc, dump, sizeof(dump)) > 0 && strncmp(dump, "line_start", 10) == 0,
+          "the dump is text");
+
+    /* The library's own destroy, through the back end's destroy entry */
+    gcontext_destroy(gc);
+    check(1, "gcontext_destroy releases the context");
+
+    printf("test_record: %d checks, %d failed\n", checks, failures);
+    return failures ? 1 : 0;
+}
