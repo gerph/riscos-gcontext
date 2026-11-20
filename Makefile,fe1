@@ -19,6 +19,7 @@ COMPONENT  = GContext
 EXPORTS    = ${EXP_LIB}.${COMPONENT}.h.gcontext \
 			 ${EXP_LIB}.${COMPONENT}.h.screen \
 			 ${EXP_LIB}.${COMPONENT}.h.border \
+			 ${EXP_LIB}.${COMPONENT}.h.gcrecord \
 
 # Comma-separated list of paths to use for includes, such as:
 #	C:LibName.
@@ -34,6 +35,7 @@ OBJS       = o.border \
              o.gcontext \
              o.gcontext_drawfile \
              o.gcontext_svg \
+             o.gcrecord \
              o.screen \
              o.vdu5 \
              o.vdushape \
@@ -49,6 +51,8 @@ ${EXP_LIB}.${COMPONENT}.h.gcontext: h.gcontext
 ${EXP_LIB}.${COMPONENT}.h.screen: h.screen
        ${CP} $?  $@  ${CPFLAGS}
 ${EXP_LIB}.${COMPONENT}.h.border: h.border
+       ${CP} $?  $@  ${CPFLAGS}
+${EXP_LIB}.${COMPONENT}.h.gcrecord: h.gcrecord
        ${CP} $?  $@  ${CPFLAGS}
 
 #---------------------------------------------------------------------------

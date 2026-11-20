@@ -1,0 +1,173 @@
+/*******************************************************************
+ * File:        gcrecord
+ * Purpose:     A recording GContext back end, for testing drawing code
+ *              without a screen.
+ * Author:      Gerph
+ *
+ * gcontext_initrecord returns a gcontext_t whose every operation is stored,
+ * as a typed record holding the arguments it was called with, instead
+ * of being plotted. A test draws through the context, then examines
+ * the records: how many there were, of which kind, with which
+ * arguments, in what order, and under what clip rectangle. A text
+ * dump of all the records is available for printing or comparing.
+ *
+ * Fonts have fixed metrics which the test sets (a character width, an
+ * ascent and a descent), so that text measures predictably.
+ *
+ * This is written only against the public gcontext_t function table
+ * (gcontext.h). It uses no RISC OS call, so it builds and runs on a host
+ * as well, which is what makes it useful for testing code that draws.
+ *
+ * Worked example
+ * --------------
+ *     gcontext_t *gc = gcontext_initrecord();
+ *
+ *     gc->rectangle_fill(gc, COLOUR_RGB(255, 0, 0), 0, 0, 100, 50);
+ *     gc->line_start(gc, COLOUR_RGB(0, 0, 0));
+ *     gc->line_line(gc, 0, 0, 100, 50);
+ *     gc->line_end(gc);
+ *
+ *     gcrecord_count(gc)                          -- 4
+ *     gcrecord_get(gc, 0)->kind                   -- GCR_RECTANGLE_FILL
+ *     gcrecord_get(gc, 0)->x1                     -- 100
+ *     gcrecord_count_kind(gc, GCR_LINE_LINE)      -- 1
+ *
+ *     gcontext_destroy(gc);
+ ******************************************************************/
+
+#ifndef GCRECORD_H
+#define GCRECORD_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include "gcontext.h"
+
+/* What was called. Each value is one gcontext_t operation. */
+typedef enum gcrecord_kind_e {
+    GCR_RECTANGLE_FILL,       /* colour, x0 y0 x1 y1 */
+    GCR_RECTANGLE_OUTLINE,    /* colour, x0 y0 x1 y1 */
+    GCR_TRIANGLE_FILL,        /* colour, x0 y0 x1 y1 x2 y2 */
+    GCR_LINE_START,           /* colour */
+    GCR_LINE_LINE,            /* x0 y0 x1 y1 */
+    GCR_LINE_DOTTED,          /* x0 y0 x1 y1 */
+    GCR_LINE_DASHED,          /* x0 y0 x1 y1 */
+    GCR_LINE_END,
+    GCR_FILL_START,           /* colour */
+    GCR_FILL_MOVE,            /* x0 y0 */
+    GCR_FILL_LINE,            /* x0 y0 */
+    GCR_FILL_CLOSE,
+    GCR_FILL_END,
+    GCR_TEXT_FINDFONT,        /* text is the font name, x0 y0 the sizes */
+    GCR_TEXT_LOSEFONT,        /* font */
+    GCR_TEXT_PAINT,           /* font, x0 y0 the baseline, colour (foreground),
+                               * colour2 (background), text, length */
+    GCR_TEXT_PAINTATTRIB,     /* as paint, with x0 y0 x1 y1 the box, and attrib */
+    GCR_CLIP,                 /* x0 y0 x1 y1 the new clip, or has_clip == 0 */
+    GCR_IMAGE_PLOT_FILE,      /* attrib the filetype, text the filename (kept to
+                               * GCR_TEXT_MAX characters), x0 y0 x1 y1 the box */
+    GCR_IMAGE_PLOT_DATA,      /* attrib the filetype, length the data length,
+                               * x0 y0 x1 y1 the box (the data is not kept) */
+    GCR_TILE_FILL             /* attrib the filetype, x0 y0 x1 y1 the rectangle;
+                               * length is 1 when the sprite is given by a pointer
+                               * (no area), 0 when text is its name in an area */
+} gcrecord_kind_t;
+
+#define GCR_TEXT_MAX  79      /* Characters of text kept in a record */
+
+typedef struct gcrecord_s {
+    gcrecord_kind_t kind;
+    colour_t        colour;
+    colour_t        colour2;
+    int32_t         x0, y0, x1, y1, x2, y2;
+    uint32_t        attrib;
+    font_t          font;
+    int32_t         length;               /* The length given for text */
+    char            text[GCR_TEXT_MAX + 1];
+    int             has_clip;             /* A clip was set when this was made... */
+    bbox_t          clip;                 /* ...and this was it */
+} gcrecord_t;
+
+/*******************************************************************
+ Function:      gcontext_initrecord
+ Description:   Make a recording graphics context (declared in gcontext.h
+                with the other initialisers). Its fonts have a character
+                width of 8, an ascent of 12 and a descent of 4 until
+                gcrecord_set_font_metrics changes them. The image
+                operations are recorded and report success.
+ Parameters:    none
+ Returns:       the context, or NULL if memory ran out
+ ******************************************************************/
+gcontext_t *gcontext_initrecord(void);
+
+/*******************************************************************
+ Function:      gcrecord_destroy
+ Description:   Release a context made by gcontext_initrecord and its
+                records. gcontext_destroy does the same through the back end
+                destroy entry, where the library is linked; this is for a
+                host build that has only the recorder.
+ Parameters:    gc = the context, or NULL (which does nothing)
+ Returns:       none
+ ******************************************************************/
+void gcrecord_destroy(gcontext_t *gc);
+
+/*******************************************************************
+ Function:      gcrecord_count
+ Description:   The number of records
+ Parameters:    gc = a recording context
+ Returns:       the number
+ ******************************************************************/
+int gcrecord_count(const gcontext_t *gc);
+
+/*******************************************************************
+ Function:      gcrecord_get
+ Description:   One record
+ Parameters:    gc = a recording context
+                index = from 0, in the order the calls were made
+ Returns:       the record, valid until the next drawing call or clear, or
+                NULL if the index is out of range
+ ******************************************************************/
+const gcrecord_t *gcrecord_get(const gcontext_t *gc, int index);
+
+/*******************************************************************
+ Function:      gcrecord_count_kind
+ Description:   The number of records of one kind
+ Parameters:    gc = a recording context
+                kind = the kind
+ Returns:       the number
+ ******************************************************************/
+int gcrecord_count_kind(const gcontext_t *gc, gcrecord_kind_t kind);
+
+/*******************************************************************
+ Function:      gcrecord_clear
+ Description:   Forget all the records. The clip rectangle stays.
+ Parameters:    gc = a recording context
+ Returns:       none
+ ******************************************************************/
+void gcrecord_clear(gcontext_t *gc);
+
+/*******************************************************************
+ Function:      gcrecord_set_font_metrics
+ Description:   Set the metrics of every font: a string measures as its
+                length times the character width
+ Parameters:    gc = a recording context
+                char_width = width of each character
+                ascent = how far characters go above the baseline
+                descent = how far they go below it
+ Returns:       none
+ ******************************************************************/
+void gcrecord_set_font_metrics(gcontext_t *gc, int32_t char_width,
+                               int32_t ascent, int32_t descent);
+
+/*******************************************************************
+ Function:      gcrecord_dump
+ Description:   Write the records as text, one line each, such as
+                "rectangle_fill colour=00ff0000 0,0 100,50"
+ Parameters:    gc = a recording context
+                buffer = where to write
+                size = size of the buffer
+ Returns:       the number of characters the whole dump needs, not counting
+                the terminator (more than size - 1 if it was cut short)
+ ******************************************************************/
+size_t gcrecord_dump(const gcontext_t *gc, char *buffer, size_t size);
+
+#endif

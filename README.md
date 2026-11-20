@@ -17,3 +17,13 @@ required.
 The library is part of the RISC OS 64 project, and is currently used within
 the WindowManager components. Historically, this library has been used in many
 private projects, a [slide presentation system](https://github.com/gerph/riscos-presenter).
+
+## Recording back end
+
+`gcontext_initrecord()` makes a context that records every operation it is
+given, rather than plotting it, so that code which draws can be tested without
+a screen. The records (`gcrecord.h`) say what was called, with which arguments,
+in what order and under which clip rectangle, and can be dumped as text. Fonts
+have metrics the test sets, so text measures predictably. The back end uses no
+RISC OS call: it is tested on a host as well (`make -C tests/host`, which needs
+only a C compiler) and on RISC OS (`MakefileTestRecord,fe1` builds `test_record`).
